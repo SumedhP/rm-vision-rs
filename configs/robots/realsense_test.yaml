@@ -1,0 +1,18 @@
+﻿camera:
+  fx: 691.1063232421875
+  fy: 691.088134765625
+  cx: 486.211181640625
+  cy: 272.5736999511719
+  dist: [0.0, 0.0, 0.0, 0.0, 0.0]
+extrinsics:
+  rpy: [0.0, 0.0, 0.0]
+  translation: [0.0, 0.0, 0.0]
+camera_delay: 0.0
+downlink_delay: 0.01
+gimbal:
+  max_yaw_acc: 60.0
+  max_pitch_acc: 40.0
+default_state:
+  q: [1.0, 0.0, 0.0, 0.0]
+  bullet_speed: 23.0
+  robot_id: 103
