@@ -3,11 +3,11 @@
 A RoboMaster auto-aim pipeline in Rust, built from [`docs/design.md`](docs/design.md). It is tested end to end on the RealSense recordings using the SZURP armor model (`Infantry-v8n-fp16-20260726-D1.8w-B16.onnx`). Calls made while building it are in [`docs/decisions.md`](docs/decisions.md).
 
 ```
-CameraSource â”€â”
-              â”œâ”€â–º Sync â”€â–º Detector pool â”€â–º Tracker â”€â–º Aimer â”€â–º AimCommand
-RobotSource â”€â”€â”˜   (pose @ frame time)       (EKF)     (ballistics + fire)
-                                    â”‚
-                                    â””â”€â–º JSONL / MCAP log / live Foxglove / overlay video
+CameraSource ─┐
+              ├─► Sync ─► Detector pool ─► Tracker ─► Aimer ─► AimCommand
+RobotSource ──┘   (pose @ frame time)       (EKF)     (ballistics + fire)
+                                    │
+                                    └─► JSONL / MCAP log / live Foxglove / overlay video
 ```
 
 ## Layout
@@ -17,12 +17,13 @@ RobotSource â”€â”€â”˜   (pose @ frame time)       (EKF)     (balli
 | `src/io/` | Inputs. `CameraSource::{Video, Log}`, `RobotSource::{Defaults, Log}` |
 | `src/sync/pose_buffer.rs` | Time sync. Gimbal pose slerped to the frame time; link latencies are fixed config values |
 | `src/detector/` | Detector. `onnx.rs` (model I/O, backends + fallback), `pool.rs` (N workers, strict frame order), `refine.rs` (lightbar corner refinement) |
-| `src/tracker/` | Tracker. `measurement.rs` (plate pose), `ekf.rs` (11-state EKF, chi-square gate), `model.rs` (robot model), `mod.rs` (selection, association, lifecycle, plate/robot mode, priors) |
-| `src/aimer/` | Aimer. `ballistics.rs` (RK4 + drag), `trajectory.rs` (acceleration-limited smoother), `aimer.rs` (plate choice, center aim, fire) |
+| `src/tracker/` | Tracker. `measurement.rs` (plate pose), `ekf.rs` (11-state iterated EKF, chi-square gate, pose or corner-pixel measurement), `model.rs` (robot model), `mod.rs` (selection, association, lifecycle, plate/robot mode, priors) |
+| `src/aimer/` | Aimer. `ballistics.rs` (RK4 + drag), `trajectory.rs` (acceleration-limited smoother), `aimer.rs` (rmcs-style attack window, pre-aim, center aim, timed fire) |
 | `src/pipeline.rs` | The loop. Runs in data time, so replays are deterministic |
 | `src/viz/` | Logging + live visualization. `foxglove.rs` (MCAP + websocket), `overlay.rs` (annotated video) |
 | `configs/` | `general.yaml` (tunings), `robots/realsense_test.yaml` (camera, latencies, gimbal), `logging.yaml` |
 | `scripts/plots.py` | Report figures from the per-frame JSONL |
+| `scripts/compare_solvers.py` | Pose vs pixel measurement, EKF vs iterated, old vs new aimer |
 
 ## Run
 
@@ -55,7 +56,7 @@ python scripts/plots.py                    # figures + out/report/summary.md
 
 ## Results on the RealSense recordings (CPU)
 
-Figures and tables are in [`docs/report/`](docs/report/) (`summary.md` plus 11 figures). The overlay videos are `docs/report/spinning_3m.mp4` and `translate_spinning.mp4`.
+Figures and tables are in [`docs/report/`](docs/report/): `summary.md` and `solver_comparison.md`, plus 14 figures. The overlay videos are `docs/report/spinning_3m.mp4` and `translate_spinning.mp4`.
 
 | What | Result | Evidence |
 |---|---|---|
@@ -65,9 +66,13 @@ Figures and tables are in [`docs/report/`](docs/report/) (`summary.md` plus 11 f
 | Robot geometry | r = 0.243 to 0.247 m (truth 0.25), l = 0.02 m (truth 0), \|h\| = 0.093 to 0.095 m (truth 0.08) | `05_geometry.png` |
 | Filter consistency | 99.5% of spinning-video updates pass the 99% chi-square gate | `06_nis.png` |
 | Prediction | Median plate position error 6.4 cm at 50 ms and 8.3 cm at 300 ms, against 15 to 22 cm for holding the last observed plate | `07_prediction.png` |
-| Aimer | Commanded yaw acceleration at most 5.9 rad/sÂ² (limit 60). Fires on 96 to 98% of static frames and 42 to 52% of spinning ticks | `08_aimer.png`, `summary.md` |
+| Pose vs pixel measurement | A tie. Pixel predicts the next frame better (0.66 vs 0.88 px median) and holds an angled static plate steadier (1.1 vs 5.4 mm). Pose has the smaller 300 ms tail (p90 17 vs 19 px) and accepts more updates (99.6 vs 96.5%). Fire rates and geometry match. Pose stays the default | `12_solver_comparison.png`, `13_solver_timeseries.png`, `solver_comparison.md` |
+| Iterated vs plain EKF | No measurable difference at 60 fps: each update is a small step | `solver_comparison.md` |
+| Aimer | Share of control ticks firing, old reactive aimer → attack window: spinning videos 42–52% → 51–62%, translate_spinning 21% → 32% (26% from the window alone, the rest from raising the smoother bandwidth 30 → 60), angled static plate 0% → 98% (the old 45° cap blocked it), other static plates 97–98% → 98%. Acceleration stays within the 60 rad/s² limit | `14_aimer_window.png`, `solver_comparison.md` |
 | Corner refinement | Keypoints are already sub-pixel stable (0.07 to 0.14 px). Refinement lowers jitter on 4 of 5 static videos and slightly raises it at 2 m, so its gain on this footage is small | `03_corner_jitter.png` |
 | Replay | Two replays of the same log are byte-identical. Replay vs the raw-video run differs by about 5 mm in center position and 0.02 rad/s in spin rate, because the log stores JPEG frames | `summary.md` |
 | Throughput | About 16 fps end to end on a Ryzen AI 7 350 CPU (3 detector workers, including JSON and overlay output) | `11_latency.png` |
+
+Known gap: the smoother only reacts. On translate_spinning it reaches each plate in the window late, leaves with extra speed and overshoots the pre-aim edge by about 1.2°; a time-optimal move would overshoot by about 0.2° (`14_aimer_window.png`). A trajectory planned over the window's known future aim points (MPC, as sp_vision does with TinyMPC) is the fix.
 
 Known gap: |h| reads about 1.4 cm high on every video. That's consistent with a systematic plate-height bias in the fixed-tilt pose fit, and it's worth checking against the real plate tilt and lightbar length.

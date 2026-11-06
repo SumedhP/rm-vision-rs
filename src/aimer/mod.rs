@@ -4,7 +4,7 @@ pub mod aimer;
 pub mod ballistics;
 pub mod trajectory;
 
-pub use aimer::{AimTarget, Aimer};
+pub use aimer::{AimKind, AimTarget, Aimer};
 pub use ballistics::Shot;
 
 use serde::Deserialize;
@@ -38,22 +38,27 @@ pub struct AimerConfig {
     pub drag: f64,
     /// Command-to-muzzle delay (trigger, feed), seconds.
     pub shoot_delay: f64,
-    /// Keep the current plate until it turns further than this from the line of sight, radians.
-    pub switch_angle: f64,
-    /// Never fire at a plate turned further than this, radians.
-    pub max_fire_angle: f64,
     /// Bullet speed used when the reported one is outside 10..30 m/s.
     pub default_bullet_speed: f64,
     /// Setpoint smoother bandwidth, rad/s.
     pub bandwidth: f64,
-    /// Above this spin rate, aim at the robot's front and wait for plates instead of chasing them, rad/s.
-    pub center_aim_spin: f64,
+    /// Widest attack window, as the plate's angle around the robot center from straight-on
+    /// (full width), radians. The window shrinks further when the gimbal can't keep up.
+    pub attack_window: f64,
+    /// The window is entered at `(1 - h)` and left at `(1 + h)` of its half width.
+    pub window_hysteresis: f64,
+    /// Share of the gimbal's speed and acceleration the window plans with, `(0, 1]`.
+    pub window_redundancy: f64,
+    /// Above this spin rate, aim at the robot center and time shots to plates crossing it, rad/s.
+    pub degraded_spin: f64,
 }
 
 /// Gimbal capability, per robot.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GimbalLimits {
+    /// Max yaw rate, rad/s.
+    pub max_yaw_vel: f64,
     /// Max yaw acceleration, rad/s^2.
     pub max_yaw_acc: f64,
     /// Max pitch acceleration, rad/s^2.

@@ -31,14 +31,38 @@ Calls made overnight without the operator. Each says what was chosen and why.
 12. **The gate is bypassed after 3 consecutive fully rejected frames.** During a violent spin-up the filter is what's wrong, not the measurements.
 13. **Process noise is per second and split per axis**: horizontal 2 m/s², vertical 0.2 m/s², spin 30 rad/s². Spin-ups in the videos reach about 10 rad/s².
 14. **Priors are stored only from robot-mode tracks.** Radius is unobservable without spin, so a static track's r is just the default.
+15. **The update is iterated (`tracker.iterations`, default 3).**
+    - Each iteration relinearizes at the latest estimate. It restarts from the prior mean and keeps the prior term `H_i (x_prior - x_i)`.
+    - SHtech's iterated filter has a sign error on that term, and awakening's drops it.
+    - Gating and the reported NIS use the prior innovation.
+    - On the recordings, iterating changes nothing measurable: next-frame error is 0.88 px either way. At 60 fps each update is a small step, so one linearization is already accurate.
+    - It's kept because it's correct and cheap, and it matters after gaps or at low frame rates. A unit test shows it fitting a strongly nonlinear corner measurement that a single step misses.
+16. **Measurement space is a config choice (`tracker.measurement: pose | pixel`), and pose stays the default.**
+    - The pixel variant measures the 4 detected corners against the model's projected plate, as rmcs and awakening do.
+    - `docs/report/solver_comparison.md` compares the two on the same footage. Neither wins outright:
+      - Pixel predicts the next frame better: 0.66 vs 0.88 px median.
+      - Pixel holds a static, angled plate much steadier: 1.1 vs 5.4 mm.
+      - Pose has the smaller error tail: 300 ms p90 of 17 vs 19 px. It also has a smaller 6 m static spread (25 vs 32 mm) and accepts more updates (99.6% vs 96.5%).
+      - Fire rates match within 1 point, and so do r and |h|.
+    - The pixel noise is 1 px. Tightening it to 0.5 or 0.3 px drops acceptance on moving plates to 47–73%, because corner error on moving plates is heavy-tailed.
 
 ## Aimer
-15. **Setpoint smoother**: a critically damped tracker with acceleration clamped to the gimbal limit, instead of quintic segments. It is shorter, and the limit holds by construction.
-16. **Center aim above 6 rad/s.** At 14 rad/s the visible plate changes every ~0.11 s. A 60 rad/s² gimbal can't slew to each plate and settle in that time; measured yaw error was 40 to 50 mrad against a ~20 mrad tolerance. The aimer instead holds on the robot's front and fires when the predicted plate crosses it at impact. Yaw error drops to about 2 mrad.
-17. **Ballistics**: RK4 at 1 ms with quadratic drag. `k = 0.019 1/m` is computed for a 17 mm, 3.2 g ball. Pitch is found by bisection on the lowest arc.
+17. **Setpoint smoother**: a critically damped tracker with acceleration clamped to the gimbal limit, instead of quintic segments. It is shorter, and the limit holds by construction. Bandwidth is 60 rad/s.
+    - At 30 rad/s it took about 0.13 s to settle, which is a whole plate period at 11.7 rad/s. It overshot every plate in the window, and the overshoot carried into the next plate.
+    - At 60 rad/s, fire rate on translate_spinning goes from 26% to 32% and on spinning_3m from 44% to 56%. The spread of the yaw command on a static target is unchanged.
+18. **Plate choice is rmcs's attack window** (`src/aimer/aimer.rs`, from rmcs `fire_control.cpp`). It replaces the old facing-angle switch, the 45° fire cap and center aim above 6 rad/s.
+    - A plate is engaged only while its angle around the robot center is inside the window. The window is at most 120° wide.
+    - The window also shrinks to the part of each plate's sweep the gimbal can follow at a steady rate while still slewing back for the next plate. This is rmcs's sawtooth model, using `max_yaw_vel` and `max_yaw_acc` at 80%.
+    - Plates are judged at the predicted impact time. Entry happens at 80% of the half width and exit at 120%.
+    - With no plate inside, the gimbal waits on the edge the next plate enters from (pre-aim).
+    - Above 12 rad/s it aims at the robot center.
+    - In pre-aim and center aim, a shot fires only when a plate's predicted position at impact crosses the line of fire (window timing).
+    - Compared with the old aimer at the same smoother bandwidth, translate_spinning (11.7 rad/s) goes from 21% to 26% of ticks firing.
+    - The angled static plate goes from 0% to 97%, because the old 45° cap blocked a 53° plate.
+19. **Ballistics**: RK4 at 1 ms with quadratic drag. `k = 0.019 1/m` is computed for a 17 mm, 3.2 g ball. Pitch is found by bisection on the lowest arc.
 
 ## Delegation
-18. **Subagents (Haiku) wrote first drafts. Several reported success on code that was stubbed or wrong**:
+20. **Subagents (Haiku) wrote first drafts. Several reported success on code that was stubbed or wrong**:
     - Detector inference was a TODO.
     - The tracker's Gauss-Newton solver used a scalar residual.
     - The aimer's ballistics failed its own tests.

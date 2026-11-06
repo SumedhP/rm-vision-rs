@@ -1,4 +1,13 @@
-﻿//! Turns the robot estimate into a smoothed gimbal command and a fire decision.
+//! Turns the robot estimate into a smoothed gimbal command and a fire decision.
+//!
+//! Plate choice follows rmcs's attack window. A plate is engaged only while its angle around the
+//! robot center is inside a window. That window narrows when the gimbal's speed and acceleration
+//! can't follow the plate across it and come back for the next one. When no plate is inside, the
+//! gimbal waits on the window edge where the next plate will enter. Above `degraded_spin` it aims
+//! at the robot center instead. In both of those cases the shot is timed to a plate crossing the
+//! line of fire at impact.
+
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use nalgebra::Vector3;
 
@@ -6,25 +15,47 @@ use super::ballistics::{self, Shot};
 use super::trajectory::Axis;
 use super::{AimCommand, AimerConfig, GimbalLimits};
 use crate::geometry::LIGHTBAR_LENGTH;
-use crate::tracker::model::wrap_angle;
-use crate::tracker::{RobotEstimate, TrackMode, TrackState};
+use crate::tracker::model::{self, State, ix, wrap_angle};
+use crate::tracker::{PlatePose, RobotEstimate, TrackMode, TrackState};
+
+/// How the aimer is engaging the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub enum AimKind {
+    /// Following a plate inside the attack window.
+    Plate,
+    /// No plate in the window: waiting on the edge the next plate enters from.
+    PreAim,
+    /// Spinning faster than `degraded_spin`: aiming at the robot center.
+    Center,
+}
 
 /// What the aimer is pointing at this tick (for logging and overlays).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct AimTarget {
-    /// Plate id being aimed at.
+    /// How the target is engaged.
+    pub kind: AimKind,
+    /// Plate being aimed at ([`AimKind::Plate`]), or the plate closest to the line of fire.
     pub plate: usize,
-    /// Predicted plate center at impact, world frame.
+    /// Aim point at impact, world frame.
     pub position: Vector3<f64>,
-    /// Angle between the plate normal and the line of sight at impact, radians.
+    /// Angle between `plate`'s normal and the line of sight at impact, radians.
     pub facing: f64,
     /// Unsmoothed ballistic solution.
     pub shot: Shot,
     /// Predicted impact time.
     pub t_hit: f64,
-    /// Angle between the shot and the plate center at impact, radians. Zero when aiming at the
-    /// plate; nonzero when aiming at the robot's front and waiting for the plate to come around.
+    /// Angle between the shot and `plate`'s center at impact, radians. Zero for
+    /// [`AimKind::Plate`].
     pub miss: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Selection {
+    Plate(usize),
+    /// Window edge as a signed angle around the robot center.
+    PreAim(f64),
+    Center,
 }
 
 /// Stateful aimer: remembers the selected plate and the smoothed gimbal setpoint.
@@ -51,23 +82,23 @@ impl Aimer {
     }
 
     /// One control tick at host time `now`.
-    ///
-    /// # Panics
-    /// Panics if a target is found but estimate is missing (invariant violation).
     pub fn update(&mut self, now: f64, est: Option<&RobotEstimate>, bullet_speed: f64, downlink_delay: f64) -> AimCommand {
         let dt = self.last_t.map_or(0.005, |t| (now - t).clamp(1e-4, 0.05));
         self.last_t = Some(now);
         let speed = if (10.0..=30.0).contains(&bullet_speed) { bullet_speed } else { self.cfg.default_bullet_speed };
         let t_cmd = now + downlink_delay;
 
-        self.target = est.and_then(|e| self.solve(e, t_cmd, speed));
-        let Some(target) = self.target else {
+        let solved = est.and_then(|e| {
+            let selection = self.select(e, t_cmd, speed)?;
+            Some((e, selection, self.aim_at(e, t_cmd, speed, selection)?))
+        });
+        self.target = solved.map(|(_, _, t)| t);
+        let Some((est, selection, target)) = solved else {
             let (yaw, pitch) = (self.yaw.unwrap_or(Axis::at(0.0)), self.pitch);
             return AimCommand { t: t_cmd, yaw: yaw.pos, pitch: pitch.pos, ..AimCommand::default() };
         };
 
-        let est = est.expect("target implies an estimate");
-        let ahead = self.solve_for(est, t_cmd + 0.01, speed, target.plate);
+        let ahead = self.aim_at(est, t_cmd + 0.01, speed, selection);
         let rate = |a: f64, b: f64| if ahead.is_some() { wrap_angle(b - a) / 0.01 } else { 0.0 };
         let want_yaw = Axis { pos: target.shot.yaw, vel: rate(target.shot.yaw, ahead.map_or(0.0, |s| s.shot.yaw)), acc: 0.0 };
         let want_pitch = Axis { pos: target.shot.pitch, vel: rate(target.shot.pitch, ahead.map_or(0.0, |s| s.shot.pitch)), acc: 0.0 };
@@ -82,7 +113,6 @@ impl Aimer {
         let yaw_tol = 0.5 * est.icon.armor_size().width() * target.facing.cos() / distance;
         let pitch_tol = 0.5 * LIGHTBAR_LENGTH / distance;
         let fire = est.state == TrackState::Confirmed
-            && target.facing < self.cfg.max_fire_angle
             && target.miss < yaw_tol
             && wrap_angle(yaw.pos - target.shot.yaw).abs() < yaw_tol
             && (self.pitch.pos - target.shot.pitch).abs() < pitch_tol;
@@ -99,73 +129,152 @@ impl Aimer {
         }
     }
 
-    /// Picks the plate (with switching hysteresis) and iterates impact time with flight time.
-    fn solve(&mut self, est: &RobotEstimate, t_cmd: f64, speed: f64) -> Option<AimTarget> {
-        let first = self.solve_plate(est, t_cmd, speed, self.plate.unwrap_or(0))?;
-        let plate = if est.mode == TrackMode::Plate {
-            est.last_plate.map_or(0, |(_, p)| p.id)
-        } else {
-            let keep = self.plate.filter(|_| first.facing < self.cfg.switch_angle);
-            keep.unwrap_or_else(|| {
-                (0..est.plate_count)
-                    .filter_map(|id| self.solve_plate(est, t_cmd, speed, id))
-                    .min_by(|a, b| a.facing.total_cmp(&b.facing))
-                    .map_or(0, |t| t.plate)
-            })
+    /// Chooses what to aim at, judged at the predicted impact time.
+    fn select(&mut self, est: &RobotEstimate, t_cmd: f64, speed: f64) -> Option<Selection> {
+        if est.mode == TrackMode::Plate {
+            self.plate = None;
+            return Some(Selection::Plate(est.last_plate.map_or(0, |(_, p)| p.id)));
+        }
+        let t_shot = t_cmd + self.cfg.shoot_delay;
+        let flight = ballistics::solve(&center(&est.state_at(t_shot)), speed, self.cfg.drag)?.flight_time;
+        let x = est.state_at(t_shot + flight);
+        let n = est.plate_count;
+        let Some(half) = self.half_window(&x, n) else {
+            self.plate = None;
+            return Some(Selection::Center);
         };
-        self.plate = Some(plate);
-        self.solve_for(est, t_cmd, speed, plate)
+        let angle = |id: usize| body_angle(&x, &model::plate(&x, id, n)).abs();
+        let h = self.cfg.window_hysteresis;
+        if let Some(id) = self.plate.filter(|&id| id < n && angle(id) <= half * (1.0 + h)) {
+            return Some(Selection::Plate(id));
+        }
+        self.plate = (0..n).filter(|&id| angle(id) <= half * (1.0 - h)).min_by(|&a, &b| angle(a).total_cmp(&angle(b)));
+        Some(match self.plate {
+            Some(id) => Selection::Plate(id),
+            None => Selection::PreAim(if x[ix::W] < 0.0 { half } else { -half }),
+        })
     }
 
-    /// Spinning too fast to follow each plate (the gimbal can't slew and settle before the next one
-    /// comes around), so hold on the robot's front and fire as a plate crosses it.
-    fn center_aim(&self, est: &RobotEstimate) -> bool {
-        est.mode == TrackMode::Robot && est.x[crate::tracker::model::ix::W].abs() > self.cfg.center_aim_spin
+    /// Half width of the attack window, or `None` when spinning too fast to engage plates.
+    fn half_window(&self, x: &State, plate_count: usize) -> Option<f64> {
+        let w = x[ix::W].abs();
+        if w > self.cfg.degraded_spin {
+            return None;
+        }
+        let r = self.cfg.window_redundancy;
+        let dynamic = tracking_window(w, x[ix::R], center(x).xy().norm(), plate_count, self.limits.max_yaw_vel * r, self.limits.max_yaw_acc * r);
+        Some((self.cfg.attack_window / 2.0).min(dynamic))
     }
 
-    fn solve_for(&self, est: &RobotEstimate, t_cmd: f64, speed: f64, plate: usize) -> Option<AimTarget> {
-        if self.center_aim(est) { self.solve_center(est, t_cmd, speed) } else { self.solve_plate(est, t_cmd, speed, plate) }
-    }
-
-    fn solve_center(&self, est: &RobotEstimate, t_cmd: f64, speed: f64) -> Option<AimTarget> {
-        use crate::tracker::model::ix;
+    fn aim_at(&self, est: &RobotEstimate, t_cmd: f64, speed: f64, selection: Selection) -> Option<AimTarget> {
         let mut flight = 0.0;
         let mut out = None;
         for _ in 0..3 {
             let t_hit = t_cmd + self.cfg.shoot_delay + flight;
             let x = est.state_at(t_hit);
-            let center = Vector3::new(x[ix::CX], x[ix::CY], x[ix::CZ]);
-            let toward_us = -center.xy().normalize();
-            let facing_of = |p: &crate::tracker::PlatePose| wrap_angle(p.yaw - p.position.y.atan2(p.position.x)).abs();
-            let plate = est.plates_at(t_hit).into_iter().min_by(|a, b| facing_of(a).total_cmp(&facing_of(b)))?;
-            let front = center.xy() + toward_us * (x[ix::R] + if plate.id % 2 == 1 { x[ix::L] } else { 0.0 });
-            let position = Vector3::new(front.x, front.y, plate.position.z);
-            let shot = ballistics::solve(&position, speed, self.cfg.drag)?;
-            flight = shot.flight_time;
-            let miss = wrap_angle(plate.position.y.atan2(plate.position.x) - shot.yaw).abs();
-            out = Some(AimTarget { plate: plate.id, position, facing: facing_of(&plate), shot, t_hit, miss });
+            let plates = est.plates_at(t_hit);
+            let target = match selection {
+                Selection::Plate(id) => {
+                    let (position, yaw) = if let (TrackMode::Plate, Some((t_seen, p))) = (est.mode, est.last_plate) {
+                        (p.position + Vector3::new(x[ix::VX], x[ix::VY], x[ix::VZ]) * (t_hit - t_seen), p.yaw)
+                    } else {
+                        let p = plates.get(id)?;
+                        (p.position, p.yaw)
+                    };
+                    let shot = ballistics::solve(&position, speed, self.cfg.drag)?;
+                    let facing = wrap_angle(yaw - position.y.atan2(position.x)).abs();
+                    AimTarget { kind: AimKind::Plate, plate: id, position, facing, shot, t_hit, miss: 0.0 }
+                }
+                Selection::PreAim(edge) => {
+                    let incoming = plates
+                        .iter()
+                        .map(|p| (p, body_angle(&x, p)))
+                        .filter(|(_, a)| (*a > 0.0) == (edge > 0.0))
+                        .min_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+                        .map_or(plates.first()?, |(p, _)| p);
+                    let c = center(&x);
+                    let radius = (incoming.position - c).xy().norm();
+                    let a = (-c.y).atan2(-c.x) + edge;
+                    self.timed(AimKind::PreAim, Vector3::new(c.x + radius * a.cos(), c.y + radius * a.sin(), incoming.position.z), &x, &plates, speed, t_hit)?
+                }
+                Selection::Center => {
+                    let c = center(&x);
+                    let front = &plates.iter().min_by(|a, b| body_angle(&x, a).abs().total_cmp(&body_angle(&x, b).abs()))?;
+                    let radius = (front.position - c).xy().norm();
+                    let toward_us = -c.xy().normalize() * radius;
+                    self.timed(AimKind::Center, Vector3::new(c.x + toward_us.x, c.y + toward_us.y, front.position.z), &x, &plates, speed, t_hit)?
+                }
+            };
+            flight = target.shot.flight_time;
+            out = Some(target);
         }
         out
     }
 
-    fn solve_plate(&self, est: &RobotEstimate, t_cmd: f64, speed: f64, plate: usize) -> Option<AimTarget> {
-        let mut flight = 0.0;
-        let mut out = None;
-        for _ in 0..3 {
-            let t_hit = t_cmd + self.cfg.shoot_delay + flight;
-            let (position, yaw) = if let (TrackMode::Plate, Some((t_seen, p))) = (est.mode, est.last_plate) {
-                let x = est.state_at(t_hit);
-                let v = Vector3::new(x[1], x[3], x[5]);
-                (p.position + v * (t_hit - t_seen), p.yaw)
-            } else {
-                let p = est.plates_at(t_hit).get(plate).copied()?;
-                (p.position, p.yaw)
-            };
-            let shot = ballistics::solve(&position, speed, self.cfg.drag)?;
-            flight = shot.flight_time;
-            let facing = wrap_angle(yaw - position.y.atan2(position.x)).abs();
-            out = Some(AimTarget { plate, position, facing, shot, t_hit, miss: 0.0 });
-        }
-        out
+    /// Shot at a fixed point, with the plate that crosses its line of fire closest at impact.
+    fn timed(&self, kind: AimKind, position: Vector3<f64>, x: &State, plates: &[PlatePose], speed: f64, t_hit: f64) -> Option<AimTarget> {
+        let shot = ballistics::solve(&position, speed, self.cfg.drag)?;
+        let miss = |p: &PlatePose| wrap_angle(p.position.y.atan2(p.position.x) - shot.yaw).abs();
+        let plate = plates.iter().filter(|p| body_angle(x, p).abs() < FRAC_PI_2).min_by(|a, b| miss(a).total_cmp(&miss(b)))?;
+        let facing = wrap_angle(plate.yaw - plate.position.y.atan2(plate.position.x)).abs();
+        Some(AimTarget { kind, plate: plate.id, position, facing, shot, t_hit, miss: miss(plate) })
+    }
+}
+
+fn center(x: &State) -> Vector3<f64> {
+    Vector3::new(x[ix::CX], x[ix::CY], x[ix::CZ])
+}
+
+/// Signed angle of a plate around the robot center, zero when it faces the gimbal; grows with
+/// the spin direction.
+fn body_angle(x: &State, plate: &PlatePose) -> f64 {
+    wrap_angle(plate.yaw - x[ix::CY].atan2(x[ix::CX]))
+}
+
+/// rmcs's sawtooth window: the half width (angle around the robot center) inside which a gimbal
+/// limited to `v_max`, `a_max` can follow a plate at a steady rate, given that it must also slew back
+/// for the next plate. `INFINITY` when it never limits.
+///
+/// Seen from the gimbal, each plate sweeps a fixed angle (`stroke`) once per `TAU / (n w)`, so the
+/// yaw target is a sawtooth. Tracking it at `v_track` and returning with a bang-bang (or
+/// trapezoidal, when speed-limited) slew leaves the remaining stroke as the steady window.
+pub fn tracking_window(w: f64, radius: f64, distance: f64, plate_count: usize, v_max: f64, a_max: f64) -> f64 {
+    let n = f64::from(u32::try_from(plate_count).unwrap_or(4));
+    if w < 0.1 || radius <= 0.0 || distance <= radius || v_max <= 0.0 || a_max <= 0.0 {
+        return f64::INFINITY;
+    }
+    let half = PI / n;
+    let sight = (distance * distance + radius * radius - 2.0 * distance * radius * half.cos()).sqrt();
+    let stroke = 2.0 * (radius * half.sin() / sight).asin();
+    let v_track = stroke * n * w / TAU;
+    let stable = if (stroke * a_max).sqrt() <= v_max + v_track {
+        stroke - 2.0 * v_track * (stroke / a_max).sqrt()
+    } else {
+        v_max * stroke / (v_max + v_track) - v_track * (v_max + v_track) / a_max
+    };
+    let phi = stable.max(0.0) / 2.0;
+    let s = distance / radius * phi.sin();
+    if s >= 1.0 { f64::INFINITY } else { s.asin() - phi }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_shrinks_with_spin_and_opens_with_distance() {
+        let window = |w, d| tracking_window(w, 0.25, d, 4, 8.0, 48.0);
+        assert!(window(0.05, 3.0).is_infinite(), "no spin: unlimited");
+        assert!(window(4.0, 3.0) > window(8.0, 3.0), "faster spin, narrower window");
+        assert!(window(8.0, 6.0) > window(8.0, 3.0), "further away, the gimbal sweeps less");
+        assert!(window(30.0, 3.0) < 0.05, "a gimbal can't follow 30 rad/s plates");
+    }
+
+    /// At 3 m and 11.7 rad/s (the `translate_spinning` video), the steady window is about 9.5 degrees
+    /// either side of straight-on, worked by hand from the formula.
+    #[test]
+    fn window_matches_hand_calculation() {
+        let half = tracking_window(11.7, 0.25, 3.0, 4, 8.0, 48.0).to_degrees();
+        assert!((8.0..11.0).contains(&half), "half window {half} deg");
     }
 }

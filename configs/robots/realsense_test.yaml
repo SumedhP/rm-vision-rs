@@ -7,6 +7,7 @@ camera_delay: 0.0
 imu_delay: 0.0
 downlink_delay: 0.01
 gimbal:
+  max_yaw_vel: 10.0
   max_yaw_acc: 60.0
   max_pitch_acc: 40.0
 default_state:

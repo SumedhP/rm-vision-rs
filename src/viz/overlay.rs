@@ -37,7 +37,7 @@ pub fn render(frame: &DetectedFrame, record: &FrameRecord, camera: &Camera) -> R
     }
 
     if let Some(est) = &record.estimate {
-        let aimed = record.target.map(|tg| tg.plate);
+        let aimed = record.target.filter(|tg| tg.kind == crate::aimer::AimKind::Plate).map(|tg| tg.plate);
         for plate in est.plates_at(frame.frame.t) {
             let corners: Option<Vec<Point2<f64>>> = armor_corners_world(est.icon.armor_size(), &plate.position, plate.yaw)
                 .iter()

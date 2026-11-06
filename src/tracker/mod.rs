@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 
-use nalgebra::{SMatrix, UnitQuaternion};
+use nalgebra::{SMatrix, SVector, UnitQuaternion};
 use serde::Deserialize;
 
 use crate::detector::{Detection, Icon};
-use crate::geometry::Camera;
+use crate::geometry::{ArmorSize, Camera};
 
 pub mod ekf;
 pub mod measurement;
@@ -15,13 +15,30 @@ pub mod model;
 pub use measurement::ArmorObservation;
 pub use model::{PlatePose, State};
 
-use ekf::{Covariance, Ekf, Measurement, ProcessNoise};
+use ekf::{Covariance, Ekf, Observation, ProcessNoise};
 use model::{ix, wrap_angle};
+
+/// What the filter is given for each detected plate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum MeasurementSpace {
+    /// The solved plate pose: bearing, distance, plate yaw (`sp_vision`).
+    Pose,
+    /// The four corner pixels, predicted by projecting the model's plate (rmcs, awakening).
+    Pixel,
+}
 
 /// Tracker settings (`tracker:` section of `configs/general.yaml`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrackerConfig {
+    /// What the filter measures.
+    pub measurement: MeasurementSpace,
+    /// Filter iterations per update (1 is a plain EKF).
+    pub iterations: usize,
+    /// Corner noise for [`MeasurementSpace::Pixel`], pixels.
+    pub sigma_corner_px: f64,
     /// Horizontal center acceleration noise, m/s^2.
     pub sigma_acc: f64,
     /// Vertical center acceleration noise, m/s^2.
@@ -40,8 +57,10 @@ pub struct TrackerConfig {
     pub sigma_plate_yaw_facing: f64,
     /// Plates with a worse `PnP` fit than this are ignored, pixels.
     pub max_reprojection_px: f64,
-    /// NIS gate (99% chi-square, 4 dof = 13.28).
-    pub chi2_gate: f64,
+    /// NIS gate for pose measurements (99% chi-square, 4 dof = 13.28).
+    pub chi2_gate_pose: f64,
+    /// NIS gate for pixel measurements (99% chi-square, 8 dof = 20.09).
+    pub chi2_gate_pixel: f64,
     /// After this many consecutive frames with every plate gated out, the filter is the one that is
     /// wrong (e.g. a violent spin-up), so the next frame is applied ungated.
     pub gate_bypass_after: usize,
@@ -199,25 +218,25 @@ impl Tracker {
         });
         track.t = t;
         track.frames_seen += 1;
-        let mine: Vec<ArmorObservation> = observations.iter().filter(|(d, _)| d.icon == track.icon).map(|(_, o)| *o).collect();
+        let mine: Vec<(&Detection, ArmorObservation)> = observations.iter().filter(|(d, _)| d.icon == track.icon).copied().collect();
         track.frames_with_icon += usize::from(!mine.is_empty() || observations.is_empty());
 
-        let gate = if track.misses >= self.cfg.gate_bypass_after { f64::INFINITY } else { self.cfg.chi2_gate };
+        let bypass = track.misses >= self.cfg.gate_bypass_after;
         let mut applied = Vec::new();
-        for obs in mine {
+        for (det, obs) in mine {
             let used: Vec<usize> = applied.iter().map(|u: &PlateUpdate| u.id).collect();
-            let z = Measurement::new(
-                obs.position.y.atan2(obs.position.x),
-                obs.position.z.atan2(obs.position.xy().norm()),
-                obs.position.norm(),
-                obs.yaw,
-            );
-            let r = measurement_noise(&self.cfg, &obs);
-            let Some(id) = associate(&track.ekf, track.plate_count, &z, &r, &used) else { continue };
-            let Some(nis) = track.ekf.update(&z, &r, id, track.plate_count, gate)
+            let plate = PlateMeasurement::new(&self.cfg, det, &obs);
+            let view = View { camera: &self.camera, q_imu, plate_count: track.plate_count };
+            let gate = if bypass { f64::INFINITY } else { plate.gate(&self.cfg) };
+            let Some(id) = (0..track.plate_count)
+                .filter(|id| !used.contains(id))
+                .filter_map(|id| plate.nis(&track.ekf, id, &view).map(|nis| (id, nis)))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(id, _)| id)
             else {
                 continue;
             };
+            let Some(nis) = plate.update(&mut track.ekf, id, &view, gate, self.cfg.iterations) else { continue };
             let accepted = nis <= gate;
             if accepted {
                 track.last_plate = Some((t, PlatePose { id, position: obs.position, yaw: obs.yaw }));
@@ -309,20 +328,61 @@ fn ratio(a: usize, b: usize) -> f64 {
     f64::from(u32::try_from(a).unwrap_or(u32::MAX)) / f64::from(u32::try_from(b.max(1)).unwrap_or(u32::MAX))
 }
 
-/// The plate id that explains the observation best (lowest NIS), skipping plates already matched
-/// this frame. Using the full innovation, not just yaw, lets the plate height and radius tell the
-/// even and odd plates apart, so a spin-up transient can't swap them.
-fn associate(ekf: &Ekf, plate_count: usize, z: &Measurement, r: &SMatrix<f64, 4, 4>, used: &[usize]) -> Option<usize> {
-    (0..plate_count)
-        .filter(|id| !used.contains(id))
-        .filter_map(|id| ekf.nis(z, r, id, plate_count).map(|nis| (id, nis)))
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(id, _)| id)
+/// What a frame's plates are measured against.
+struct View<'a> {
+    camera: &'a Camera,
+    q_imu: &'a UnitQuaternion<f64>,
+    plate_count: usize,
 }
-fn measurement_noise(cfg: &TrackerConfig, obs: &ArmorObservation) -> SMatrix<f64, 4, 4> {
-    let d = obs.position.norm();
-    let facing = wrap_angle(obs.yaw - obs.position.y.atan2(obs.position.x)).cos();
-    let yaw_sigma = cfg.sigma_plate_yaw_oblique + (cfg.sigma_plate_yaw_facing - cfg.sigma_plate_yaw_oblique) * facing * facing;
-    let dist_sigma = cfg.sigma_distance_per_m2 * d * d;
-    SMatrix::from_diagonal(&Measurement::new(cfg.sigma_bearing.powi(2), cfg.sigma_bearing.powi(2), dist_sigma.powi(2), yaw_sigma.powi(2)))
+
+/// One detected plate in the configured measurement space.
+///
+/// Association picks the plate id with the lowest NIS. Using the full innovation, not just yaw,
+/// lets plate height and radius tell even and odd plates apart, so a spin-up can't swap them.
+#[expect(clippy::large_enum_variant, reason = "one short-lived value per detection")]
+enum PlateMeasurement {
+    Pose(Observation<4>),
+    Pixel(Observation<8>, ArmorSize),
+}
+
+impl PlateMeasurement {
+    fn new(cfg: &TrackerConfig, det: &Detection, obs: &ArmorObservation) -> Self {
+        match cfg.measurement {
+            MeasurementSpace::Pose => {
+                let p = obs.position;
+                let z = SVector::<f64, 4>::new(p.y.atan2(p.x), p.z.atan2(p.xy().norm()), p.norm(), obs.yaw);
+                let facing = wrap_angle(obs.yaw - p.y.atan2(p.x)).cos();
+                let yaw_sigma = cfg.sigma_plate_yaw_oblique + (cfg.sigma_plate_yaw_facing - cfg.sigma_plate_yaw_oblique) * facing * facing;
+                let dist_sigma = cfg.sigma_distance_per_m2 * p.norm_squared();
+                let r = SVector::<f64, 4>::new(cfg.sigma_bearing.powi(2), cfg.sigma_bearing.powi(2), dist_sigma.powi(2), yaw_sigma.powi(2));
+                Self::Pose(Observation { z, r: SMatrix::from_diagonal(&r), angles: &[0, 3] })
+            }
+            MeasurementSpace::Pixel => {
+                let z = SVector::<f64, 8>::from_iterator(det.corners.iter().flat_map(|c| [c.x, c.y]));
+                let r = SMatrix::<f64, 8, 8>::identity() * cfg.sigma_corner_px.powi(2);
+                Self::Pixel(Observation { z, r, angles: &[] }, det.icon.armor_size())
+            }
+        }
+    }
+
+    fn gate(&self, cfg: &TrackerConfig) -> f64 {
+        match self {
+            Self::Pose(_) => cfg.chi2_gate_pose,
+            Self::Pixel(..) => cfg.chi2_gate_pixel,
+        }
+    }
+
+    fn nis(&self, filter: &Ekf, id: usize, v: &View<'_>) -> Option<f64> {
+        match self {
+            Self::Pose(o) => filter.nis(o, |x| Some(ekf::measure_pose(x, id, v.plate_count))),
+            Self::Pixel(o, size) => filter.nis(o, |x| ekf::measure_corners(x, id, v.plate_count, *size, v.camera, v.q_imu)),
+        }
+    }
+
+    fn update(&self, filter: &mut Ekf, id: usize, v: &View<'_>, gate: f64, iterations: usize) -> Option<f64> {
+        match self {
+            Self::Pose(o) => filter.update(o, |x| Some(ekf::measure_pose(x, id, v.plate_count)), gate, iterations),
+            Self::Pixel(o, size) => filter.update(o, |x| ekf::measure_corners(x, id, v.plate_count, *size, v.camera, v.q_imu), gate, iterations),
+        }
+    }
 }

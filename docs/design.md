@@ -21,13 +21,13 @@ Why: decent ROS compatibility, and modern tooling for building and adding librar
 ## High level overview
 
 ```
-CameraSource â”€â”
-              â”œâ”€â–º Sync â”€â–º Detector â”€â–º Tracker â”€â–º Aimer â”€â–º MCU
-RobotSource â”€â”€â”˜   (pose @ frame time)   (EKF)    (ballistics + fire)
-      â”‚                                                     â”‚
-      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–º Logger â—„â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-                              â”œâ”€â”€â–º MCAP file â”€â”€â–º Replay
-                              â””â”€â”€â–º Live websocket â”€â”€â–º Foxglove (laptop)
+CameraSource ─┐
+              ├─► Sync ─► Detector ─► Tracker ─► Aimer ─► MCU
+RobotSource ──┘   (pose @ frame time)   (EKF)    (ballistics + fire)
+      │                                                     │
+      └───────────────────► Logger ◄────────────────────────┘
+                              ├──► MCAP file ──► Replay
+                              └──► Live websocket ──► Foxglove (laptop)
 ```
 
 ## Inputs to the system
@@ -118,7 +118,7 @@ Even with TensorRT, a node TensorRT doesn't support runs on CUDA/CPU instead, so
 - Also check that each detection is consistent with the prediction (a chi-square gate on the innovation), since icon matching alone won't stop one misclassified frame or a reflection from yanking the state.
 - Drop the target and re-pick after it's been unseen for N frames.
 
-**Robot filter.** The EKF estimates the whole robot: center position, velocity, yaw, spin rate, radius, 2nd radius, and plate heights.
+**Robot filter.** An iterated EKF measuring either the solved plate pose or the four corner pixels (config) estimates the whole robot: center position, velocity, yaw, spin rate, radius, 2nd radius, and plate heights.
 - When the spin rate is low, radius and center aren't observable. In that case, aim straight at the observed plate's predicted position (plate mode). Switch to aiming from the full model (robot mode) once it's clearly spinning. Use separate on/off thresholds so it doesn't flicker.
 - Reset the covariance too when re-initializing, not just the state.
 
@@ -128,7 +128,12 @@ Even with TensorRT, a node TensorRT doesn't support runs on CUDA/CPU instead, so
 
 `RobotEstimate + RobotState → AimCommand`
 
-1. **Pick the plate**: in robot mode, choose the plate that will face us at impact time, not the one nearest right now.
+1. **Pick the plate** (rmcs-style attack window), judged at impact time, not now:
+   - In robot mode, engage a plate only while its angle around the robot center is inside a window.
+   - The window narrows to what the gimbal's speed and acceleration can follow and still slew back for the next plate.
+   - With no plate inside, pre-aim at the edge the next plate enters from.
+   - Above a spin limit, aim at the robot center.
+   - In both of those cases, time the shot to a plate crossing the line of fire at impact.
 2. **Solve the impact time**: iterate `t_hit = latency + flight_time(predicted position)` until it converges (2–3 iterations).
 3. **Ballistics**: gravity + drag model, using the *measured* bullet speed. Drag coefficient lives in config and gets tuned from logged shots.
 4. **Trajectory**: smooth the yaw/pitch target over time within the gimbal's max acceleration (quintic segments or MPC), so switching plates doesn't jerk the gimbal.
