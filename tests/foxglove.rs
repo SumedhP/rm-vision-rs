@@ -1,112 +1,53 @@
-﻿#![warn(missing_docs)]
-#![allow(missing_docs)]
+//! The MCAP log round-trips through replay, and the live websocket accepts connections.
 
-use std::net::TcpStream;
-use std::path::PathBuf;
 use std::sync::Arc;
 
+use auto_aim::detector::DetectedFrame;
 use auto_aim::geometry::{Camera, CameraConfig};
-use auto_aim::io::{CameraFrame, RobotState};
+use auto_aim::io::{CameraFrame, RobotState, mcap_log};
 use auto_aim::pipeline::FrameRecord;
 use auto_aim::viz::foxglove::Publisher;
-use image::RgbImage;
+use image::{Rgb, RgbImage};
 use nalgebra::UnitQuaternion;
 
-#[test]
-fn test_publish_mcap() -> color_eyre::Result<()> {
-    let log_path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join("agent_fox")
-        .join("test_synthetic.mcap");
-    std::fs::create_dir_all(log_path.parent().unwrap())?;
-    let _ = std::fs::remove_file(&log_path);
+fn camera() -> Camera {
+    Camera::from(&CameraConfig { k: [700.0, 700.0, 48.0, 27.0], dist: [0.0; 4], rpy: [0.0; 3], translation: [0.0; 3] })
+}
 
-    // Create publisher and publish 5 synthetic frames
-    let mut publisher = Publisher::new(Some(&log_path), None, 0.0)?;
-
-    let camera = Camera::from(&CameraConfig {
-        k: [700.0, 700.0, 480.0, 270.0],
-        dist: [0.0; 4],
-        rpy: [0.0; 3],
-        translation: [0.05, 0.0, 0.1],
-    });
-
-    let robot_state = RobotState {
-        t: 0.0,
-        q: UnitQuaternion::identity(),
-        bullet_speed: 15.0,
-        robot_id: 5,
-    };
-
-    for frame_idx in 0..5 {
-        let t = f64::from(frame_idx) * 0.05; // 50ms between frames
-
-        let mut image = RgbImage::new(96, 54);
-        for pixel in image.iter_mut() {
-            *pixel = 128;
-        }
-
-        let frame = CameraFrame {
-            frame_id: u64::try_from(frame_idx).unwrap_or(0),
-            t,
-            image: Arc::new(image),
-        };
-
-        let detected = auto_aim::detector::DetectedFrame {
-            frame,
-            detections: vec![],
-        };
-
-        let mut robot = robot_state;
-        robot.t = t;
-
-        let record = FrameRecord {
-            robot,
-            estimate: None,
-            commands: vec![],
-            target: None,
-        };
-
-        publisher.publish(&detected, &record, &camera)?;
-    }
-
-    publisher.finish()?;
-
-    // Verify MCAP file was created
-    assert!(log_path.exists(), "MCAP file should be created");
-
-    let metadata = std::fs::metadata(&log_path)?;
-    assert!(
-        metadata.len() > 0,
-        "MCAP file should have content, got {} bytes",
-        metadata.len()
-    );
-
-    Ok(())
+fn publish(p: &mut Publisher, i: u32, robot: RobotState) {
+    let t = f64::from(i) / 60.0;
+    let image = RgbImage::from_pixel(96, 54, Rgb([200, 40, u8::try_from(i * 40).expect("small")]));
+    let frame = DetectedFrame { frame: CameraFrame { frame_id: u64::from(i), t, image: Arc::new(image) }, detections: vec![] };
+    let record = FrameRecord { robot: RobotState { t, ..robot }, estimate: None, commands: vec![], target: None };
+    p.publish(&frame, &record, &camera()).expect("publish");
 }
 
 #[test]
-fn test_websocket_server() -> color_eyre::Result<()> {
-    let publisher = Publisher::new(None, Some(18765), 0.0)?;
-
-    // Try connecting to the websocket server
-    let result = std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        TcpStream::connect("127.0.0.1:18765")
-    })
-    .join();
-
-    drop(publisher);
-
-    match result {
-        Ok(Ok(_stream)) => Ok(()),
-        Ok(Err(e)) => {
-            // Connection refused is acceptable if server didn't fully start
-            if e.kind() == std::io::ErrorKind::ConnectionRefused {
-                Ok(())
-            } else {
-                Err(color_eyre::eyre::eyre!("TCP connection failed: {}", e))
-            }
-        }
-        Err(_) => Err(color_eyre::eyre::eyre!("Thread panicked")),
+fn log_replays_frames_and_robot_states() {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("roundtrip.mcap");
+    let robot = RobotState { t: 0.0, q: UnitQuaternion::from_euler_angles(0.0, 0.1, 0.4), bullet_speed: 23.5, robot_id: 103 };
+    let mut p = Publisher::new(Some(&path), None, 0.0).expect("open log");
+    for i in 0..5 {
+        publish(&mut p, i, robot);
     }
+    p.finish().expect("close log");
+
+    let (mut frames, states) = mcap_log::open(&path).expect("reopen log");
+    for i in 0..5u32 {
+        let f = frames.next_frame().expect("decodes").expect("five frames");
+        assert!((f.t - f64::from(i) / 60.0).abs() < 1e-6, "frame {i} keeps its data time");
+        assert_eq!(f.image.dimensions(), (96, 54), "frame {i} keeps its size");
+        let blue = i32::from(f.image.get_pixel(48, 27)[2]);
+        assert!((blue - i32::try_from(i * 40).expect("small")).abs() < 8, "frame {i} pixels survive JPEG");
+    }
+    assert!(frames.next_frame().expect("decodes").is_none(), "exactly five frames");
+    assert_eq!(states.len(), 5, "one robot state per frame");
+    assert!(states[0].q.angle_to(&robot.q) < 1e-9 && (states[0].bullet_speed - 23.5).abs() < 1e-12, "robot state round-trips");
+}
+
+#[test]
+fn live_websocket_accepts_a_client() {
+    let p = Publisher::new(None, Some(18765), 0.0).expect("server starts");
+    assert!(std::net::TcpStream::connect("127.0.0.1:18765").is_ok(), "port is listening");
+    p.finish().expect("server stops");
 }

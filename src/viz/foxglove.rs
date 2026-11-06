@@ -1,4 +1,4 @@
-//! Foxglove publishing. The same messages go to an MCAP file (the log) and, optionally, a live
+﻿//! Foxglove publishing. The same messages go to an MCAP file (the log) and, optionally, a live
 //! websocket server that the Foxglove app connects to.
 
 use std::path::Path;
@@ -26,7 +26,7 @@ pub struct Publisher {
     robot_state_channel: Arc<RawChannel>,
     frame_channel: Arc<RawChannel>,
     scene_channel: Channel<SceneUpdate>,
-    _mcap: Option<Box<dyn std::any::Any>>,
+    mcap: Option<foxglove::McapWriterHandle<std::io::BufWriter<std::fs::File>>>,
     _websocket: Option<WebSocketServerHandle>,
     image_rate: f64,
     last_image_time: f64,
@@ -44,8 +44,8 @@ impl Publisher {
         let mcap_writer = if let Some(path) = mcap {
             let writer = McapWriter::new()
                 .context(&context)
-                .create_new_buffered_file(path)?;
-            Some(Box::new(writer) as Box<dyn std::any::Any>)
+                .create(std::io::BufWriter::new(std::fs::File::create(path)?))?;
+            Some(writer)
         } else {
             None
         };
@@ -76,7 +76,7 @@ impl Publisher {
             robot_state_channel,
             frame_channel,
             scene_channel: context.channel_builder("/scene").build(),
-            _mcap: mcap_writer,
+            mcap: mcap_writer,
             _websocket: websocket_handle,
             image_rate,
             last_image_time: -1e9,
@@ -102,12 +102,12 @@ impl Publisher {
                 data: jpeg_data.into(),
                 format: "jpeg".into(),
             };
-            self.image_channel.log(&img_msg);
+            self.image_channel.log_with_meta(&img_msg, at(log_time_ns));
         }
 
         // Publish image annotations
         let annotations = build_annotations(frame, record, camera)?;
-        self.annotations_channel.log(&annotations);
+        self.annotations_channel.log_with_meta(&annotations, at(log_time_ns));
 
         // Publish robot state as JSON
         let robot_json = json!({
@@ -122,7 +122,7 @@ impl Publisher {
             "robot_id": record.robot.robot_id,
         });
         let robot_bytes = serde_json::to_vec(&robot_json)?;
-        self.robot_state_channel.log(&robot_bytes);
+        self.robot_state_channel.log_with_meta(&robot_bytes, at(log_time_ns));
 
         // Publish full frame record
         let mut frame_json = serde_json::to_value(record)?;
@@ -131,7 +131,7 @@ impl Publisher {
             obj.insert("detections".into(), serde_json::to_value(&frame.detections)?);
         }
         let frame_bytes = serde_json::to_vec(&frame_json)?;
-        self.frame_channel.log(&frame_bytes);
+        self.frame_channel.log_with_meta(&frame_bytes, at(log_time_ns));
 
         // Publish scene (predicted plates as cubes)
         if let Some(est) = &record.estimate {
@@ -192,7 +192,7 @@ impl Publisher {
             }
 
             let scene = SceneUpdate { deletions: vec![], entities };
-            self.scene_channel.log(&scene);
+            self.scene_channel.log_with_meta(&scene, at(log_time_ns));
         }
 
         Ok(())
@@ -206,9 +206,17 @@ impl Publisher {
         if let Some(ws) = self._websocket {
             let _ = ws.stop();
         }
-        drop(self._mcap);
+        if let Some(writer) = self.mcap {
+            writer.close()?;
+        }
         Ok(())
     }
+}
+
+/// Messages are stamped with the frame's data time, not the wall clock, so a replayed log has
+/// the same timeline as the run that recorded it.
+fn at(log_time_ns: u64) -> foxglove::PartialMetadata {
+    foxglove::PartialMetadata { log_time: Some(log_time_ns) }
 }
 
 fn time_to_ns(t: f64) -> u64 {
