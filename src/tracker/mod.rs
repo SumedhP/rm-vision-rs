@@ -8,6 +8,11 @@ pub mod model;
 
 pub use model::{PlatePose, State};
 
+/// Tracker settings (`tracker:` section of `configs/general.yaml`).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackerConfig {}
+
 /// Which output the aimer should trust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

@@ -23,6 +23,11 @@ pub struct AimCommand {
     pub fire: bool,
 }
 
+/// Aimer settings (`aimer:` section of `configs/general.yaml`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AimerConfig {}
+
 /// Gimbal capability, per robot.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -75,6 +75,11 @@ pub struct Detection {
     pub corners: [Point2<f64>; 4],
 }
 
+/// Detector settings (`detector:` section of `configs/general.yaml`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetectorConfig {}
+
 /// A frame plus everything the detector found in it.
 #[derive(Debug, Clone)]
 pub struct DetectedFrame {

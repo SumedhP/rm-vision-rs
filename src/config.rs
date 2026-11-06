@@ -14,7 +14,14 @@ use crate::io::RobotState;
 /// Robot-agnostic tunings (`configs/general.yaml`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GeneralConfig {}
+pub struct GeneralConfig {
+    /// Detector settings.
+    pub detector: crate::detector::DetectorConfig,
+    /// Tracker settings.
+    pub tracker: crate::tracker::TrackerConfig,
+    /// Aimer settings.
+    pub aimer: crate::aimer::AimerConfig,
+}
 
 /// Per-robot geometry and timing (`configs/robots/<name>.yaml`).
 #[derive(Debug, Clone, Deserialize)]
