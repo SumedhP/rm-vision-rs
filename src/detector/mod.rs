@@ -6,6 +6,13 @@ use serde::Deserialize;
 use crate::geometry::ArmorSize;
 use crate::io::CameraFrame;
 
+pub mod onnx;
+pub mod pool;
+pub mod refine;
+
+pub use onnx::{Backend, Detector};
+pub use onnx::DetectorConfig;
+
 /// Lightbar color, in model output order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,11 +81,6 @@ pub struct Detection {
     /// Lightbar end points in original image pixels: TL, BL, BR, TR.
     pub corners: [Point2<f64>; 4],
 }
-
-/// Detector settings (`detector:` section of `configs/general.yaml`).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DetectorConfig {}
 
 /// A frame plus everything the detector found in it.
 #[derive(Debug, Clone)]

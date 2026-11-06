@@ -1,3 +1,35 @@
-﻿detector: {}
-tracker: {}
-aimer: {}
+﻿detector:
+  model: assets/models/Infantry-v8n-fp16-20260726-D1.8w-B16.onnx
+  backends: [tensorrt, cuda, cpu]
+  require_backend: false
+  fp16: true
+  engine_cache: out/trt_cache
+  score_threshold: 0.5
+  nms_iou: 0.4
+  refine_corners: true
+  workers: 3
+tracker:
+  sigma_acc: 0.1
+  sigma_alpha: 0.1
+  angle_noise: 1.5e-3
+  distance_noise_base: 0.01
+  distance_noise_coeff: 0.01
+  plate_yaw_noise_base_deg: 4.0
+  chi2_gate: 13.28
+  spin_rate_robot: 2.0
+  spin_rate_plate: 1.0
+  confirmed_frames: 3
+  lost_frames: 30
+  prior_min_frames: 5
+  default_radius: 0.25
+aimer:
+  # Quadratic drag coefficient (m^-1): a = -k*|v|*v. Default 0.019 for 17mm bullets.
+  drag_coeff: 0.019
+  # Time from command to actual fire (seconds).
+  shoot_delay: 0.05
+  # Plate switch threshold: only switch when current plate faces more than this (radians, ~35 deg).
+  switch_angle: 0.6109
+  # Max angle from facing to shoot (radians, ~45 deg).
+  max_fire_angle: 0.7854
+  # Fallback bullet speed (m/s) when measurement is out of [10, 30].
+  default_bullet_speed: 20.0

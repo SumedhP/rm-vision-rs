@@ -6,6 +6,10 @@ rust-version = "1.89"
 description = "RoboMaster auto-aim pipeline: detector, robot EKF, ballistics, logging and replay"
 publish = false
 
+[features]
+# CUDA and TensorRT execution providers. Build with this on the Jetson; without it those backends report unavailable and the detector falls back to CPU.
+gpu = ["ort/cuda", "ort/tensorrt"]
+
 [dependencies]
 nalgebra = { version = "0.35", features = ["serde-serialize"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
