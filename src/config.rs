@@ -1,4 +1,4 @@
-//! YAML configuration, split the way the design doc describes: general tunings, per-robot
+﻿//! YAML configuration, split the way the design doc describes: general tunings, per-robot
 //! geometry/timing, and logging.
 
 use std::path::{Path, PathBuf};
@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::aimer::GimbalLimits;
-use crate::geometry::{CameraExtrinsics, CameraIntrinsics};
+use crate::geometry::CameraConfig;
 use crate::io::RobotState;
 
 /// Robot-agnostic tunings (`configs/general.yaml`).
@@ -27,13 +27,13 @@ pub struct GeneralConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RobotConfig {
-    /// Camera intrinsics.
-    pub camera: CameraIntrinsics,
-    /// Camera mounting on the gimbal.
-    pub extrinsics: CameraExtrinsics,
-    /// Exposure-to-arrival delay from the ChArUco calibration, seconds.
+    /// Camera intrinsics and mounting.
+    pub camera: CameraConfig,
+    /// Exposure-to-host-arrival delay of camera frames, seconds (measured offline).
     pub camera_delay: f64,
-    /// Host-to-MCU command delay, seconds (tuned).
+    /// MCU-to-host delay of robot state packets, seconds (measured offline).
+    pub imu_delay: f64,
+    /// Host-to-MCU command delay, seconds (measured offline).
     pub downlink_delay: f64,
     /// Gimbal acceleration limits.
     pub gimbal: GimbalLimits,

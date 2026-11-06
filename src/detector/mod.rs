@@ -1,4 +1,4 @@
-//! Armor detector: SZURP YOLOv8-pose model (`Infantry-v8n-fp16-20260726-D1.8w-B16.onnx`).
+﻿//! Armor detector: SZURP YOLOv8-pose model (`Infantry-v8n-fp16-20260726-D1.8w-B16.onnx`).
 
 use nalgebra::Point2;
 use serde::Deserialize;
@@ -14,7 +14,7 @@ pub use onnx::{Backend, Detector};
 pub use onnx::DetectorConfig;
 
 /// Lightbar color, in model output order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ArmorColor {
@@ -29,7 +29,7 @@ pub enum ArmorColor {
 }
 
 /// Plate sticker, in model output order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Icon {
@@ -70,7 +70,7 @@ impl Icon {
 }
 
 /// One detected armor plate.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct Detection {
     /// Lightbar color.
     pub color: ArmorColor,

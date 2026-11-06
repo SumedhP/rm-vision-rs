@@ -1,4 +1,4 @@
-//! Pipeline inputs: camera frames and robot (turret + referee) state.
+﻿//! Pipeline inputs: camera frames and robot (turret + referee) state.
 //!
 //! Each input has a closed set of sources. `Live` hardware sources (camera SDK, serial) are
 //! added as new variants when the hardware is available.
@@ -24,7 +24,7 @@ pub struct CameraFrame {
 }
 
 /// Turret and referee state from the MCU.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, serde::Serialize)]
 pub struct RobotState {
     /// Sample time, seconds on the pipeline clock.
     #[serde(default)]

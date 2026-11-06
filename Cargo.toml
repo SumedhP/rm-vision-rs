@@ -12,6 +12,8 @@ gpu = ["ort/cuda", "ort/tensorrt"]
 
 [dependencies]
 nalgebra = { version = "0.35", features = ["serde-serialize"] }
+kornia-3d = "0.2"
+kornia-algebra = "0.2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 ort = { version = "=2.0.0-rc.15", features = ["ndarray"] }
 ndarray = "0.17"

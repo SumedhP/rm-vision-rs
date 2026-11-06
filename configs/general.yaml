@@ -9,27 +9,28 @@
   refine_corners: true
   workers: 3
 tracker:
-  sigma_acc: 0.1
-  sigma_alpha: 0.1
-  angle_noise: 1.5e-3
-  distance_noise_base: 0.01
-  distance_noise_coeff: 0.01
-  plate_yaw_noise_base_deg: 4.0
+  sigma_acc: 2.0
+  sigma_acc_z: 0.2
+  sigma_alpha: 30.0
+  sigma_geometry: 0.002
+  sigma_bearing: 0.003
+  sigma_distance_per_m2: 0.012
+  sigma_plate_yaw_oblique: 0.08
+  sigma_plate_yaw_facing: 0.30
+  max_reprojection_px: 3.0
   chi2_gate: 13.28
-  spin_rate_robot: 2.0
-  spin_rate_plate: 1.0
-  confirmed_frames: 3
+  gate_bypass_after: 3
+  robot_mode_enter: 2.0
+  robot_mode_exit: 1.0
+  confirm_updates: 5
   lost_frames: 30
-  prior_min_frames: 5
+  prior_min_updates: 60
+  prior_min_agreement: 0.8
   default_radius: 0.25
 aimer:
-  # Quadratic drag coefficient (m^-1): a = -k*|v|*v. Default 0.019 for 17mm bullets.
-  drag_coeff: 0.019
-  # Time from command to actual fire (seconds).
+  drag: 0.019
   shoot_delay: 0.05
-  # Plate switch threshold: only switch when current plate faces more than this (radians, ~35 deg).
-  switch_angle: 0.6109
-  # Max angle from facing to shoot (radians, ~45 deg).
-  max_fire_angle: 0.7854
-  # Fallback bullet speed (m/s) when measurement is out of [10, 30].
-  default_bullet_speed: 20.0
+  switch_angle: 0.61
+  max_fire_angle: 0.79
+  default_bullet_speed: 23.0
+  bandwidth: 30.0

@@ -14,7 +14,10 @@ pub const N: usize = 11;
 pub type State = SVector<f64, N>;
 
 /// Index of each state component.
-#[expect(missing_docs, reason = "names mirror the state layout documented above")]
+#[expect(
+    missing_docs,
+    reason = "names mirror the state layout documented above"
+)]
 pub mod ix {
     pub const CX: usize = 0;
     pub const VX: usize = 1;
@@ -30,7 +33,7 @@ pub mod ix {
 }
 
 /// One armor plate predicted from the model.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct PlatePose {
     /// Plate index, 0..plate_count.
     pub id: usize,
@@ -53,8 +56,10 @@ pub fn predict(x: &State, dt: f64) -> State {
 /// Pose of plate `id` out of `plate_count` evenly spaced plates.
 pub fn plate(x: &State, id: usize, plate_count: usize) -> PlatePose {
     let odd = id % 2 == 1 && plate_count == 4;
-    let step = std::f64::consts::TAU / f64::from(u32::try_from(plate_count).expect("plate count is 3 or 4"));
-    let yaw = wrap_angle(x[ix::YAW] + step * f64::from(u32::try_from(id).expect("plate id is small")));
+    let step = std::f64::consts::TAU
+        / f64::from(u32::try_from(plate_count).expect("plate count is 3 or 4"));
+    let yaw =
+        wrap_angle(x[ix::YAW] + step * f64::from(u32::try_from(id).expect("plate id is small")));
     let r = x[ix::R] + if odd { x[ix::L] } else { 0.0 };
     let z = x[ix::CZ] + if odd { x[ix::H] } else { 0.0 };
     PlatePose {
@@ -66,13 +71,19 @@ pub fn plate(x: &State, id: usize, plate_count: usize) -> PlatePose {
 
 /// All plates.
 pub fn plates(x: &State, plate_count: usize) -> Vec<PlatePose> {
-    (0..plate_count).map(|id| plate(x, id, plate_count)).collect()
+    (0..plate_count)
+        .map(|id| plate(x, id, plate_count))
+        .collect()
 }
 
 /// Wraps an angle to `(-pi, pi]`.
 pub fn wrap_angle(a: f64) -> f64 {
     let w = a.rem_euclid(std::f64::consts::TAU);
-    if w > std::f64::consts::PI { w - std::f64::consts::TAU } else { w }
+    if w > std::f64::consts::PI {
+        w - std::f64::consts::TAU
+    } else {
+        w
+    }
 }
 
 #[cfg(test)]
@@ -85,7 +96,10 @@ mod tests {
         x[ix::CX] = 3.25;
         x[ix::R] = 0.25;
         let p = plate(&x, 0, 4);
-        assert!((p.position - Vector3::new(3.0, 0.0, 0.0)).norm() < 1e-12, "plate 0 is between viewer and center");
+        assert!(
+            (p.position - Vector3::new(3.0, 0.0, 0.0)).norm() < 1e-12,
+            "plate 0 is between viewer and center"
+        );
     }
 
     #[test]
@@ -95,7 +109,10 @@ mod tests {
         x[ix::L] = 0.05;
         x[ix::H] = 0.08;
         let p = plate(&x, 1, 4);
-        assert!((p.position.xy().norm() - 0.30).abs() < 1e-12, "odd radius is r + l");
+        assert!(
+            (p.position.xy().norm() - 0.30).abs() < 1e-12,
+            "odd radius is r + l"
+        );
         assert!((p.position.z - 0.08).abs() < 1e-12, "odd height is cz + h");
     }
 
@@ -105,6 +122,9 @@ mod tests {
         x[ix::VX] = 1.0;
         x[ix::W] = 2.0;
         let y = predict(&x, 0.5);
-        assert!((y[ix::CX] - 0.5).abs() < 1e-12 && (y[ix::YAW] - 1.0).abs() < 1e-12, "cv + constant spin");
+        assert!(
+            (y[ix::CX] - 0.5).abs() < 1e-12 && (y[ix::YAW] - 1.0).abs() < 1e-12,
+            "cv + constant spin"
+        );
     }
 }
