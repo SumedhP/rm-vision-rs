@@ -104,6 +104,10 @@ pub struct RobotEstimate {
     pub last_plate: Option<(f64, PlatePose)>,
     /// Plates used in this frame's update, with their NIS. Empty when coasting.
     pub updates: Vec<PlateUpdate>,
+    /// Frames this target has been tracked for.
+    pub frames_seen: usize,
+    /// Share of those frames whose detections agreed with `icon`.
+    pub icon_agreement: f64,
 }
 
 impl RobotEstimate {
@@ -276,7 +280,6 @@ impl Tracker {
 
     fn drop_track(&mut self) {
         let Some(track) = self.track.take() else { return };
-        let ratio = |a: usize, b: usize| f64::from(u32::try_from(a).unwrap_or(u32::MAX)) / f64::from(u32::try_from(b.max(1)).unwrap_or(u32::MAX));
         let agreement = ratio(track.frames_with_icon, track.frames_seen);
         if track.updates >= self.cfg.prior_min_updates && agreement >= self.cfg.prior_min_agreement && track.mode == TrackMode::Robot {
             let x = track.ekf.x;
@@ -296,8 +299,14 @@ impl Tracker {
             p: track.ekf.p,
             last_plate: track.last_plate,
             updates,
+            frames_seen: track.frames_seen,
+            icon_agreement: ratio(track.frames_with_icon, track.frames_seen),
         })
     }
+}
+
+fn ratio(a: usize, b: usize) -> f64 {
+    f64::from(u32::try_from(a).unwrap_or(u32::MAX)) / f64::from(u32::try_from(b.max(1)).unwrap_or(u32::MAX))
 }
 
 /// The plate id that explains the observation best (lowest NIS), skipping plates already matched

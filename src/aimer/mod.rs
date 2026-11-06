@@ -46,6 +46,8 @@ pub struct AimerConfig {
     pub default_bullet_speed: f64,
     /// Setpoint smoother bandwidth, rad/s.
     pub bandwidth: f64,
+    /// Above this spin rate, aim at the robot's front and wait for plates instead of chasing them, rad/s.
+    pub center_aim_spin: f64,
 }
 
 /// Gimbal capability, per robot.

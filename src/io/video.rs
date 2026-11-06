@@ -1,4 +1,4 @@
-//! Video file camera source, decoded by an `ffmpeg` child process.
+﻿//! Video file camera source, decoded by an `ffmpeg` child process.
 
 use std::fmt;
 use std::io::Read;
@@ -95,6 +95,11 @@ impl VideoSource {
             reader: Box::new(reader),
             buf: vec![0u8; (width * height * 3) as usize],
         })
+    }
+
+    /// Frame rate reported by the container.
+    pub fn fps(&self) -> f64 {
+        self.fps
     }
 
     /// Next frame, or `None` at end of file.

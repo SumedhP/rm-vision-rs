@@ -34,3 +34,4 @@ aimer:
   max_fire_angle: 0.79
   default_bullet_speed: 23.0
   bandwidth: 30.0
+  center_aim_spin: 6.0
