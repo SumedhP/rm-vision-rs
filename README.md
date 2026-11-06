@@ -26,7 +26,7 @@ RobotSource â”€â”€â”˜   (pose @ frame time)       (EKF)     (balli
 
 ## Run
 
-Needs Rust (edition 2024), and `ffmpeg`/`ffprobe` on PATH. The videos and model go in `assets/` (not committed): `assets/videos/*.mp4` from `rm-auto-aim` branch `basic-infra`, and `assets/models/` from SZURP.
+Needs Rust (edition 2024), and `ffmpeg`/`ffprobe` on PATH. The SZURP model is committed in `assets/models/`. The videos are not: put `assets/videos/*.mp4` from `rm-auto-aim` branch `basic-infra` there.
 
 ```sh
 cargo build --release                      # add --features gpu on the Jetson (CUDA/TensorRT)
