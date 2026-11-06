@@ -89,8 +89,8 @@ impl Aimer {
         let t_cmd = now + downlink_delay;
 
         let solved = est.and_then(|e| {
-            let selection = self.select(e, t_cmd, speed)?;
-            Some((e, selection, self.aim_at(e, t_cmd, speed, selection)?))
+            let (selection, flight) = self.select(e, t_cmd, speed)?;
+            Some((e, selection, self.aim_at(e, t_cmd, speed, selection, flight, 2)?))
         });
         self.target = solved.map(|(_, _, t)| t);
         let Some((est, selection, target)) = solved else {
@@ -98,7 +98,7 @@ impl Aimer {
             return AimCommand { t: t_cmd, yaw: yaw.pos, pitch: pitch.pos, ..AimCommand::default() };
         };
 
-        let ahead = self.aim_at(est, t_cmd + 0.01, speed, selection);
+        let ahead = self.aim_at(est, t_cmd + 0.01, speed, selection, target.shot.flight_time, 1);
         let rate = |a: f64, b: f64| if ahead.is_some() { wrap_angle(b - a) / 0.01 } else { 0.0 };
         let want_yaw = Axis { pos: target.shot.yaw, vel: rate(target.shot.yaw, ahead.map_or(0.0, |s| s.shot.yaw)), acc: 0.0 };
         let want_pitch = Axis { pos: target.shot.pitch, vel: rate(target.shot.pitch, ahead.map_or(0.0, |s| s.shot.pitch)), acc: 0.0 };
@@ -129,30 +129,32 @@ impl Aimer {
         }
     }
 
-    /// Chooses what to aim at, judged at the predicted impact time.
-    fn select(&mut self, est: &RobotEstimate, t_cmd: f64, speed: f64) -> Option<Selection> {
-        if est.mode == TrackMode::Plate {
-            self.plate = None;
-            return Some(Selection::Plate(est.last_plate.map_or(0, |(_, p)| p.id)));
-        }
+    /// Chooses what to aim at, judged at the predicted impact time. Also returns the flight time
+    /// to the robot center, which seeds the impact-time iteration.
+    fn select(&mut self, est: &RobotEstimate, t_cmd: f64, speed: f64) -> Option<(Selection, f64)> {
         let t_shot = t_cmd + self.cfg.shoot_delay;
         let flight = ballistics::solve(&center(&est.state_at(t_shot)), speed, self.cfg.drag)?.flight_time;
+        if est.mode == TrackMode::Plate {
+            self.plate = None;
+            return Some((Selection::Plate(est.last_plate.map_or(0, |(_, p)| p.id)), flight));
+        }
         let x = est.state_at(t_shot + flight);
         let n = est.plate_count;
         let Some(half) = self.half_window(&x, n) else {
             self.plate = None;
-            return Some(Selection::Center);
+            return Some((Selection::Center, flight));
         };
         let angle = |id: usize| body_angle(&x, &model::plate(&x, id, n)).abs();
         let h = self.cfg.window_hysteresis;
         if let Some(id) = self.plate.filter(|&id| id < n && angle(id) <= half * (1.0 + h)) {
-            return Some(Selection::Plate(id));
+            return Some((Selection::Plate(id), flight));
         }
         self.plate = (0..n).filter(|&id| angle(id) <= half * (1.0 - h)).min_by(|&a, &b| angle(a).total_cmp(&angle(b)));
-        Some(match self.plate {
+        let selection = match self.plate {
             Some(id) => Selection::Plate(id),
             None => Selection::PreAim(if x[ix::W] < 0.0 { half } else { -half }),
-        })
+        };
+        Some((selection, flight))
     }
 
     /// Half width of the attack window, or `None` when spinning too fast to engage plates.
@@ -166,10 +168,10 @@ impl Aimer {
         Some((self.cfg.attack_window / 2.0).min(dynamic))
     }
 
-    fn aim_at(&self, est: &RobotEstimate, t_cmd: f64, speed: f64, selection: Selection) -> Option<AimTarget> {
-        let mut flight = 0.0;
+    /// Iterates impact time with flight time, starting from the flight-time guess `flight`.
+    fn aim_at(&self, est: &RobotEstimate, t_cmd: f64, speed: f64, selection: Selection, mut flight: f64, iterations: usize) -> Option<AimTarget> {
         let mut out = None;
-        for _ in 0..3 {
+        for _ in 0..iterations {
             let t_hit = t_cmd + self.cfg.shoot_delay + flight;
             let x = est.state_at(t_hit);
             let plates = est.plates_at(t_hit);

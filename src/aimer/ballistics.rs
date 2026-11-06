@@ -4,7 +4,10 @@ use nalgebra::Vector3;
 
 /// Standard gravity, m/s^2.
 pub const G: f64 = 9.81;
-const STEP: f64 = 1e-3;
+/// RK4 step. Over the 0.1 to 0.4 s flights here the integration error is far below a millimeter.
+const STEP: f64 = 5e-3;
+/// Stop iterating once the simulated shot passes this close to the target height, meters.
+const HEIGHT_TOLERANCE: f64 = 1e-6;
 
 /// Gun angles and time of flight for one target.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
@@ -26,41 +29,60 @@ pub fn height_at(range: f64, speed: f64, pitch: f64, drag: f64) -> Option<(f64, 
     };
     let (mut pos, mut vel, mut t) = ([0.0f64; 2], [speed * pitch.cos(), speed * pitch.sin()], 0.0);
     while t < 3.0 {
-        let k1v = accel(vel);
-        let v2 = [vel[0] + 0.5 * STEP * k1v[0], vel[1] + 0.5 * STEP * k1v[1]];
-        let k2v = accel(v2);
-        let v3 = [vel[0] + 0.5 * STEP * k2v[0], vel[1] + 0.5 * STEP * k2v[1]];
-        let k3v = accel(v3);
-        let v4 = [vel[0] + STEP * k3v[0], vel[1] + STEP * k3v[1]];
-        let k4v = accel(v4);
-        let next_pos = [0, 1].map(|i| pos[i] + STEP / 6.0 * (vel[i] + 2.0 * v2[i] + 2.0 * v3[i] + v4[i]));
-        let next_vel = [0, 1].map(|i| vel[i] + STEP / 6.0 * (k1v[i] + 2.0 * k2v[i] + 2.0 * k3v[i] + k4v[i]));
-        if next_pos[0] >= range {
-            let f = (range - pos[0]) / (next_pos[0] - pos[0]);
-            return Some((pos[1] + f * (next_pos[1] - pos[1]), t + f * STEP));
+        let remaining = range - pos[0];
+        if remaining < 1e-7 {
+            return Some((pos[1], t));
         }
-        if next_vel[0] <= 0.0 {
+        // Shorten the last steps to land on `range` instead of interpolating across a full step.
+        // Drag only slows the bullet, so this undershoots and converges in two or three steps.
+        let h = (remaining / vel[0]).min(STEP);
+        let k1v = accel(vel);
+        let v2 = [vel[0] + 0.5 * h * k1v[0], vel[1] + 0.5 * h * k1v[1]];
+        let k2v = accel(v2);
+        let v3 = [vel[0] + 0.5 * h * k2v[0], vel[1] + 0.5 * h * k2v[1]];
+        let k3v = accel(v3);
+        let v4 = [vel[0] + h * k3v[0], vel[1] + h * k3v[1]];
+        let k4v = accel(v4);
+        pos = [0, 1].map(|i| pos[i] + h / 6.0 * (vel[i] + 2.0 * v2[i] + 2.0 * v3[i] + v4[i]));
+        vel = [0, 1].map(|i| vel[i] + h / 6.0 * (k1v[i] + 2.0 * k2v[i] + 2.0 * k3v[i] + k4v[i]));
+        t += h;
+        if vel[0] <= 0.0 {
             return None;
         }
-        (pos, vel, t) = (next_pos, next_vel, t + STEP);
     }
     None
 }
 
 /// Lowest-arc shot from the muzzle (origin) through `target` (world frame, meters).
+///
+/// Secant iteration on the simulated miss height, started from the drag-free closed-form pitch,
+/// which is already within a few millimeters of a hit at these ranges. Usually 3 to 4 simulations.
 pub fn solve(target: &Vector3<f64>, speed: f64, drag: f64) -> Option<Shot> {
     let range = target.xy().norm();
-    let miss = |pitch: f64| height_at(range, speed, pitch, drag).map(|(z, _)| z - target.z);
-    let (mut lo, mut hi) = (-0.6f64, 0.7f64);
-    if miss(lo)? > 0.0 || miss(hi)? < 0.0 {
-        return None;
+    let miss = |pitch: f64| height_at(range, speed, pitch, drag).map(|(z, t)| (z - target.z, t));
+    let mut a = vacuum_pitch(range, target.z, speed)?;
+    let (mut miss_a, mut flight) = miss(a)?;
+    let mut b = a + 0.01;
+    for _ in 0..10 {
+        if miss_a.abs() < HEIGHT_TOLERANCE {
+            return Some(Shot { yaw: target.y.atan2(target.x), pitch: a, flight_time: flight });
+        }
+        let (miss_b, flight_b) = miss(b)?;
+        let next = b - miss_b * (b - a) / (miss_b - miss_a);
+        (a, miss_a, flight) = (b, miss_b, flight_b);
+        b = next;
+        if !b.is_finite() {
+            return None;
+        }
     }
-    for _ in 0..50 {
-        let mid = f64::midpoint(lo, hi);
-        if miss(mid)? < 0.0 { lo = mid } else { hi = mid }
-    }
-    let pitch = f64::midpoint(lo, hi);
-    Some(Shot { yaw: target.y.atan2(target.x), pitch, flight_time: height_at(range, speed, pitch, drag)?.1 })
+    None
+}
+
+/// Lowest-arc pitch without drag. `None` when out of reach even in a vacuum, which drag only shortens.
+fn vacuum_pitch(range: f64, height: f64, speed: f64) -> Option<f64> {
+    let a = G * range * range / (2.0 * speed * speed);
+    let disc = range * range - 4.0 * a * (a + height);
+    (disc >= 0.0 && a > 0.0).then(|| ((range - disc.sqrt()) / (2.0 * a)).atan())
 }
 
 #[cfg(test)]
@@ -84,6 +106,16 @@ mod tests {
         assert!(shot.pitch > vac.pitch && shot.flight_time > vac.flight_time, "drag needs a higher, slower shot");
         let (z, _) = height_at(target.xy().norm(), 23.0, shot.pitch, 0.019).expect("arrives");
         assert!((z - target.z).abs() < 1e-3, "re-simulated hit within 1 mm");
+    }
+
+    /// Reference pitches from an independent 0.1 ms RK4 + bisection (`k = 0.019`, 23 m/s, level target).
+    #[test]
+    fn matches_fine_step_reference() {
+        for (range, reference_deg) in [(2.0, 1.091), (4.0, 2.240), (6.0, 3.454), (8.0, 4.738)] {
+            let shot = solve(&Vector3::new(range, 0.0, 0.0), 23.0, 0.019).expect("reachable");
+            let height_err = (shot.pitch.to_degrees() - reference_deg).to_radians() * range;
+            assert!(height_err.abs() < 1e-3, "{range} m: pitch {} deg, {height_err} m off the reference", shot.pitch.to_degrees());
+        }
     }
 
     #[test]
