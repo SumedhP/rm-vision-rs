@@ -28,7 +28,7 @@ type Residual = SVector<f64, 8>;
 pub fn solve_armor(det: &Detection, cam: &Camera, q_imu: &UnitQuaternion<f64>) -> Option<ArmorObservation> {
     let size = det.icon.armor_size();
     let [tl, bl, br, tr] = det.corners;
-    let bar_px = 0.5 * ((bl - tl).norm() + (br - tr).norm());
+    let bar_px = f64::midpoint((bl - tl).norm(), (br - tr).norm());
     if bar_px < 2.0 {
         return None;
     }

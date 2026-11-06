@@ -38,8 +38,8 @@ pub struct RobotState {
     pub robot_id: u8,
 }
 
-fn quat_wxyz<'de, D: serde::Deserializer<'de>>(d: D) -> Result<UnitQuaternion<f64>, D::Error> {
-    let [w, x, y, z] = <[f64; 4]>::deserialize(d)?;
+fn quat_wxyz<'de, D: serde::Deserializer<'de>>(deser: D) -> Result<UnitQuaternion<f64>, D::Error> {
+    let [w, x, y, z] = <[f64; 4]>::deserialize(deser)?;
     Ok(UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(w, x, y, z)))
 }
 
@@ -50,7 +50,7 @@ pub enum CameraSource {
     /// A video file decoded by ffmpeg. Timestamps are `frame_id / fps`.
     Video(video::VideoSource),
     /// Frames recorded in an MCAP log by this pipeline.
-    Log(mcap_log::McapCameraSource),
+    Log(Box<mcap_log::McapCameraSource>),
 }
 
 impl CameraSource {

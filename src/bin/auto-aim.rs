@@ -65,7 +65,7 @@ fn main() -> color_eyre::Result<()> {
         (None, Some(log)) => {
             let (frames, states) = mcap_log::open(log)?;
             let robot_source = if states.is_empty() { RobotSource::Defaults(robot.default_state) } else { RobotSource::Log(states) };
-            (CameraSource::Log(frames), robot_source, 60.0)
+            (CameraSource::Log(Box::new(frames)), robot_source, 60.0)
         }
         _ => bail!("pass exactly one of --video or --replay"),
     };

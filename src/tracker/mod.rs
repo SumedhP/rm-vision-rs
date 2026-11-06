@@ -32,13 +32,13 @@ pub struct TrackerConfig {
     pub sigma_geometry: f64,
     /// Bearing noise, radians.
     pub sigma_bearing: f64,
-    /// Distance noise per squared meter of distance (PnP depth error grows with d^2).
+    /// Distance noise per squared meter of distance (`PnP` depth error grows with d^2).
     pub sigma_distance_per_m2: f64,
     /// Plate yaw noise when the plate is seen edge-on, radians.
     pub sigma_plate_yaw_oblique: f64,
     /// Plate yaw noise when the plate faces the camera (yaw is least observable there), radians.
     pub sigma_plate_yaw_facing: f64,
-    /// Plates with a worse PnP fit than this are ignored, pixels.
+    /// Plates with a worse `PnP` fit than this are ignored, pixels.
     pub max_reprojection_px: f64,
     /// NIS gate (99% chi-square, 4 dof = 13.28).
     pub chi2_gate: f64,

@@ -1,4 +1,4 @@
-//! Detector on the real RealSense recordings with the SZURP model.
+//! Detector on the real `RealSense` recordings with the SZURP model.
 
 use std::path::Path;
 

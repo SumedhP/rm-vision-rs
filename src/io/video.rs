@@ -9,6 +9,10 @@ use image::RgbImage;
 
 use super::CameraFrame;
 
+fn buffer_size(width: u32, height: u32) -> usize {
+    (u64::from(width) * u64::from(height) * 3).try_into().expect("buffer size overflow")
+}
+
 /// Decodes a video file frame by frame via ffmpeg.
 pub struct VideoSource {
     width: u32,
@@ -38,7 +42,7 @@ impl VideoSource {
     pub fn open(path: &Path) -> color_eyre::Result<Self> {
         let path_str = path.to_string_lossy();
         let probe = Command::new("ffprobe")
-            .args(&[
+            .args([
                 "-v", "error",
                 "-select_streams", "v:0",
                 "-show_entries", "stream=width,height,r_frame_rate",
@@ -71,12 +75,12 @@ impl VideoSource {
         };
 
         let ffmpeg = Command::new("ffmpeg")
-            .args(&[
+            .args([
                 "-v", "error",
                 "-i",
             ])
             .arg(path_str.as_ref())
-            .args(&[
+            .args([
                 "-f", "rawvideo",
                 "-pix_fmt", "rgb24",
                 "-",
@@ -93,7 +97,7 @@ impl VideoSource {
             fps,
             frame_id: 0,
             reader: Box::new(reader),
-            buf: vec![0u8; (width * height * 3) as usize],
+            buf: vec![0u8; buffer_size(width, height)],
         })
     }
 
@@ -111,6 +115,7 @@ impl VideoSource {
             Ok(()) => {
                 let image = RgbImage::from_raw(self.width, self.height, self.buf.clone())
                     .ok_or_else(|| color_eyre::eyre::eyre!("invalid RGB buffer size"))?;
+                #[expect(clippy::cast_precision_loss, clippy::as_conversions, reason = "frame count to seconds conversion")]
                 let t = self.frame_id as f64 / self.fps;
                 let frame = CameraFrame {
                     frame_id: self.frame_id,

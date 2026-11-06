@@ -79,6 +79,7 @@ impl Ekf {
         Some(nis)
     }
 
+    #[expect(clippy::many_single_char_names, reason = "z, r: Kalman filter measurement/covariance; h: observation fn; a, b: finite difference states")]
     fn innovation(&self, z: &Measurement, r: &SMatrix<f64, 4, 4>, id: usize, plate_count: usize) -> Option<Innovation> {
         let h = |x: &State| measure(x, id, plate_count);
         let mut jac = SMatrix::<f64, 4, N>::zeros();

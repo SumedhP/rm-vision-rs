@@ -56,10 +56,10 @@ pub fn solve(target: &Vector3<f64>, speed: f64, drag: f64) -> Option<Shot> {
         return None;
     }
     for _ in 0..50 {
-        let mid = 0.5 * (lo + hi);
+        let mid = f64::midpoint(lo, hi);
         if miss(mid)? < 0.0 { lo = mid } else { hi = mid }
     }
-    let pitch = 0.5 * (lo + hi);
+    let pitch = f64::midpoint(lo, hi);
     Some(Shot { yaw: target.y.atan2(target.x), pitch, flight_time: height_at(range, speed, pitch, drag)?.1 })
 }
 

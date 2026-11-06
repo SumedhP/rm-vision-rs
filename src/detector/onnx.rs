@@ -25,7 +25,7 @@ const PAD: u8 = 124;
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Backend {
-    /// NVIDIA TensorRT.
+    /// NVIDIA `TensorRT`.
     #[serde(rename = "tensorrt")]
     TensorRt,
     /// NVIDIA CUDA.
@@ -58,13 +58,13 @@ pub struct DetectorConfig {
     pub backends: Vec<Backend>,
     /// Fail at startup unless the first backend is available.
     pub require_backend: bool,
-    /// FP16 for TensorRT.
+    /// FP16 for `TensorRT`.
     pub fp16: bool,
-    /// TensorRT engine cache directory.
+    /// `TensorRT` engine cache directory.
     pub engine_cache: PathBuf,
     /// Minimum class score.
     pub score_threshold: f32,
-    /// IoU above which the weaker of two overlapping detections is dropped.
+    /// `IoU` above which the weaker of two overlapping detections is dropped.
     pub nms_iou: f64,
     /// Snap keypoints to lightbar edges.
     pub refine_corners: bool,
@@ -88,13 +88,13 @@ impl Detector {
     pub fn new(cfg: &DetectorConfig) -> color_eyre::Result<Self> {
         let backend = cfg.backends.iter().copied().find(|b| b.is_available()).unwrap_or(Backend::Cpu);
         let first = cfg.backends.first().copied().unwrap_or(Backend::Cpu);
-        if backend != first {
+        if backend == first {
+            tracing::info!(active = ?backend, "detector backend");
+        } else {
             if cfg.require_backend {
                 bail!("required backend {first:?} is unavailable");
             }
             tracing::warn!(requested = ?first, active = ?backend, "detector backend fell back");
-        } else {
-            tracing::info!(active = ?backend, "detector backend");
         }
         let providers: Vec<ExecutionProviderDispatch> = cfg.backends.iter().map(|b| provider(*b, cfg)).collect();
         let session = Session::builder(environment()?)
@@ -159,6 +159,7 @@ fn provider(b: Backend, cfg: &DetectorConfig) -> ExecutionProviderDispatch {
     if cfg.require_backend && cfg.backends.first() == Some(&b) { dispatch.error_on_failure() } else { dispatch }
 }
 
+#[expect(clippy::needless_pass_by_value, reason = "used with map_err which requires ownership")]
 fn ort_err<R>(e: ort::Error<R>) -> color_eyre::Report {
     color_eyre::eyre::eyre!("onnxruntime: {e}")
 }
@@ -195,7 +196,7 @@ impl Letterbox {
         t
     }
 
-    fn to_source(&self, x: f32, y: f32) -> Option<Point2<f64>> {
+    fn to_source(self, x: f32, y: f32) -> Option<Point2<f64>> {
         let p = Point2::new(
             (f64::from(x) - f64::from(self.pad_x)) / self.scale,
             (f64::from(y) - f64::from(self.pad_y)) / self.scale,

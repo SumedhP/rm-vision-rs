@@ -84,10 +84,8 @@ pub fn run(
     while let Some(mut frame) = camera_source.next_frame()? {
         frame.t -= robot_cfg.camera_delay;
         pool.submit(frame)?;
-        if pool.in_flight() >= depth {
-            if let Some(done) = pool.recv() {
-                process(done)?;
-            }
+        if pool.in_flight() >= depth && let Some(done) = pool.recv() {
+            process(done)?;
         }
     }
     while let Some(done) = pool.recv() {

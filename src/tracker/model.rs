@@ -35,7 +35,7 @@ pub mod ix {
 /// One armor plate predicted from the model.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct PlatePose {
-    /// Plate index, 0..plate_count.
+    /// Plate index, `0..plate_count`.
     pub id: usize,
     /// Plate center, world frame.
     pub position: Vector3<f64>,
@@ -54,6 +54,9 @@ pub fn predict(x: &State, dt: f64) -> State {
 }
 
 /// Pose of plate `id` out of `plate_count` evenly spaced plates.
+///
+/// # Panics
+/// Panics if `plate_count` doesn't fit in u32.
 pub fn plate(x: &State, id: usize, plate_count: usize) -> PlatePose {
     let odd = id % 2 == 1 && plate_count == 4;
     let step = std::f64::consts::TAU

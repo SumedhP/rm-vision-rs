@@ -51,6 +51,9 @@ impl Aimer {
     }
 
     /// One control tick at host time `now`.
+    ///
+    /// # Panics
+    /// Panics if a target is found but estimate is missing (invariant violation).
     pub fn update(&mut self, now: f64, est: Option<&RobotEstimate>, bullet_speed: f64, downlink_delay: f64) -> AimCommand {
         let dt = self.last_t.map_or(0.005, |t| (now - t).clamp(1e-4, 0.05));
         self.last_t = Some(now);
@@ -99,17 +102,16 @@ impl Aimer {
     /// Picks the plate (with switching hysteresis) and iterates impact time with flight time.
     fn solve(&mut self, est: &RobotEstimate, t_cmd: f64, speed: f64) -> Option<AimTarget> {
         let first = self.solve_plate(est, t_cmd, speed, self.plate.unwrap_or(0))?;
-        let plate = match est.mode {
-            TrackMode::Plate => est.last_plate.map_or(0, |(_, p)| p.id),
-            _ => {
-                let keep = self.plate.filter(|_| first.facing < self.cfg.switch_angle);
-                keep.unwrap_or_else(|| {
-                    (0..est.plate_count)
-                        .filter_map(|id| self.solve_plate(est, t_cmd, speed, id))
-                        .min_by(|a, b| a.facing.total_cmp(&b.facing))
-                        .map_or(0, |t| t.plate)
-                })
-            }
+        let plate = if est.mode == TrackMode::Plate {
+            est.last_plate.map_or(0, |(_, p)| p.id)
+        } else {
+            let keep = self.plate.filter(|_| first.facing < self.cfg.switch_angle);
+            keep.unwrap_or_else(|| {
+                (0..est.plate_count)
+                    .filter_map(|id| self.solve_plate(est, t_cmd, speed, id))
+                    .min_by(|a, b| a.facing.total_cmp(&b.facing))
+                    .map_or(0, |t| t.plate)
+            })
         };
         self.plate = Some(plate);
         self.solve_for(est, t_cmd, speed, plate)
@@ -151,16 +153,13 @@ impl Aimer {
         let mut out = None;
         for _ in 0..3 {
             let t_hit = t_cmd + self.cfg.shoot_delay + flight;
-            let (position, yaw) = match (est.mode, est.last_plate) {
-                (TrackMode::Plate, Some((t_seen, p))) => {
-                    let x = est.state_at(t_hit);
-                    let v = Vector3::new(x[1], x[3], x[5]);
-                    (p.position + v * (t_hit - t_seen), p.yaw)
-                }
-                _ => {
-                    let p = est.plates_at(t_hit).get(plate).copied()?;
-                    (p.position, p.yaw)
-                }
+            let (position, yaw) = if let (TrackMode::Plate, Some((t_seen, p))) = (est.mode, est.last_plate) {
+                let x = est.state_at(t_hit);
+                let v = Vector3::new(x[1], x[3], x[5]);
+                (p.position + v * (t_hit - t_seen), p.yaw)
+            } else {
+                let p = est.plates_at(t_hit).get(plate).copied()?;
+                (p.position, p.yaw)
             };
             let shot = ballistics::solve(&position, speed, self.cfg.drag)?;
             flight = shot.flight_time;

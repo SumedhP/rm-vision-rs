@@ -65,9 +65,9 @@ pub fn open(path: &Path) -> color_eyre::Result<(McapCameraSource, Vec<RobotState
     for message in MessageReader::new(BufReader::new(File::open(path)?)) {
         let msg = message?;
         if msg.channel.topic == "/robot_state" {
-            let s: LoggedState = serde_json::from_slice(&msg.data)?;
-            let [w, x, y, z] = s.q;
-            states.push(RobotState { t: s.t, q: UnitQuaternion::from_quaternion(Quaternion::new(w, x, y, z)), bullet_speed: s.bullet_speed, robot_id: s.robot_id });
+            let state: LoggedState = serde_json::from_slice(&msg.data)?;
+            let [w, x, y, z] = state.q;
+            states.push(RobotState { t: state.t, q: UnitQuaternion::from_quaternion(Quaternion::new(w, x, y, z)), bullet_speed: state.bullet_speed, robot_id: state.robot_id });
         }
     }
     let reader = MessageReader::new(BufReader::new(File::open(path)?));

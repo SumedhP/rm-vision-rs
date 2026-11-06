@@ -59,7 +59,7 @@ fn refine_bar(image: &RgbImage, top: Point2<f64>, bottom: Point2<f64>, color: Ar
         let q = p - c;
         (a + q.x * q.x, b + q.y * q.y, d + q.x * q.y)
     });
-    let lambda = 0.5 * (sxx + syy) + (0.25 * (sxx - syy).powi(2) + sxy * sxy).sqrt();
+    let lambda = f64::midpoint(sxx, syy) + (0.25 * (sxx - syy).powi(2) + sxy * sxy).sqrt();
     let mut axis = if sxy.abs() > 1e-9 { Vector2::new(sxy, lambda - sxx) } else if sxx > syy { Vector2::x() } else { Vector2::y() };
     axis.normalize_mut();
     let net_axis = (bottom - top) / len;

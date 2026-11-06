@@ -1,4 +1,4 @@
-# Auto-Aim System Design
+﻿# Auto-Aim System Design
 
 ## Language: Rust
 
@@ -8,7 +8,6 @@ Why: decent ROS compatibility, and modern tooling for building and adding librar
 | --- | --- |
 | nalgebra | Linear algebra (like Eigen) |
 | kornia-rs | Image ops (like OpenCV): resize, warp, undistort. Its PnP (`kornia-3d`/`kornia-pnp`) is EPnP + LM refinement only, and EPnP is weak on 4 coplanar armor corners. Write IPPE ourselves (closed form, small) or seed LM from the tracker's prediction |
-| calib-targets | ChArUco detection for the latency calibration tool (kornia-rs has no ArUco). Fallback: the `opencv` crate, in the calibration tool only |
 | ort | Run the detector model on TensorRT, CUDA, or CPU (see Detector → Backends). `tensorrt` feature supports aarch64 Linux (needs CUDA 11.6+, TensorRT 8.4+, which JetPack has) |
 | foxglove | One API for both logging (writes MCAP) and live streaming (websocket server Foxglove connects to). Comes with standard message schemas (images, annotations, 3D scenes) |
 | mcap | Reading logs back for replay |
@@ -22,13 +21,13 @@ Why: decent ROS compatibility, and modern tooling for building and adding librar
 ## High level overview
 
 ```
-CameraSource ─┐
-              ├─► Sync ─► Detector ─► Tracker ─► Aimer ─► MCU
-RobotSource ──┘   (pose @ frame time)   (EKF)    (ballistics + fire)
-      │                                                     │
-      └───────────────────► Logger ◄────────────────────────┘
-                              ├──► MCAP file ──► Replay
-                              └──► Live websocket ──► Foxglove (laptop)
+CameraSource â”€â”
+              â”œâ”€â–º Sync â”€â–º Detector â”€â–º Tracker â”€â–º Aimer â”€â–º MCU
+RobotSource â”€â”€â”˜   (pose @ frame time)   (EKF)    (ballistics + fire)
+      â”‚                                                     â”‚
+      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–º Logger â—„â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+                              â”œâ”€â”€â–º MCAP file â”€â”€â–º Replay
+                              â””â”€â”€â–º Live websocket â”€â”€â–º Foxglove (laptop)
 ```
 
 ## Inputs to the system
@@ -44,7 +43,7 @@ struct CameraFrame {
 
 ```rust
 struct RobotState {
-    t_mcu: u32,           // MCU tick (µs) when the IMU was sampled; handle wraparound
+    t: f64,               // Jetson arrival time minus imu_delay (fixed, measured offline)
     q: UnitQuaternion,    // gimbal orientation (or roll/pitch/yaw; quaternion avoids wrap/gimbal-lock bugs)
     bullet_speed: f32,    // last *measured* speed; fall back to config default if out of range
     robot_id: u8,         // own id; enemy color is derived from this
@@ -74,17 +73,21 @@ The camera queue keeps only the **latest** frame. If processing falls behind, dr
 
 ### Time sync
 
-Everything is converted to the Jetson clock. That takes two pieces:
+Everything is on the Jetson clock, and each link has **one fixed, stored latency** in the per-robot config:
 
-1. **MCU → Jetson clock map (online).** The two clocks have an arbitrary offset that changes every boot, and the MCU crystal drifts, so this can't be a constant from offline calibration. Each serial packet gives a pair `(t_mcu, t_jetson_arrival)`. Fit `t_jetson ≈ a·t_mcu + b` with RLS plus a forgetting factor.
-   - Serial jitter only ever makes packets late, so follow the **earliest** arrivals: skip updates that land well above the line.
-   - Reset when the tick jumps backwards (wraparound or MCU reboot).
-2. **Camera delay (offline).** `camera_delay` is the time between exposure and the frame arriving on the Jetson. Calibrate it with a fixed ChArUco board in front of the robot: sweep the gimbal back and forth, compare the yaw from the board pose against the IMU yaw, and solve for the time shift that lines them up.
-   - ChArUco over a plain checkerboard because partial and blurred views still give a pose, and fast sweeps are where the delay shows most.
-   - Re-run if exposure, resolution, or the USB setup changes.
+| Value | Meaning |
+|---|---|
+| `camera_delay` | Exposure to frame arrival on the Jetson. `t_frame = t_arrival − camera_delay`. |
+| `imu_delay` | IMU sample on the MCU to packet arrival on the Jetson. `t_pose = t_arrival − imu_delay`. |
+| `downlink_delay` | Command sent by the Jetson to applied on the MCU. Commands are computed for `now + downlink_delay`. |
 
-Then for each frame: `t_frame = t_jetson − camera_delay`, and the pose is a slerp of the buffered IMU samples at `t_frame`.
+For each frame, the pose is a slerp of the buffered IMU samples at `t_frame` (`src/sync/pose_buffer.rs`). There is no online clock estimation in this codebase.
 
+**Suggested way to measure the latencies (out of scope here):**
+- `camera_delay − imu_delay`: point the camera at a fixed ChArUco board and sweep the gimbal back and forth at several speeds. Log frames and IMU packets, each stamped on arrival. Get the camera's rotation from the board pose, then find the time shift that best lines up its angular rate with the IMU's (cross-correlation or least squares over the shift). The residual should be flat across sweep speeds. Only this difference matters for pose alignment.
+- `imu_delay` alone: echo a packet MCU → Jetson → MCU and take half the round trip (or toggle a GPIO the camera can see).
+- `downlink_delay`: command a step in yaw and time it to the first encoder motion on the MCU, minus the gimbal's own response time; or tune it by hand until the aim stops lagging a constant-velocity target.
+- Re-measure when exposure, resolution, USB/serial setup or firmware changes.
 ## Detector
 
 `Frame → Frame + Detections`
@@ -163,7 +166,7 @@ Keep it from hurting the pipeline:
 ## Config
 
 - **Detector**: model path, `backends` list, `require_backend`, FP16, engine cache path, thresholds.
-- **General** (robot agnostic): noise values, gates, mode thresholds, drag coefficient, per-class geometry defaults, clock-fit forgetting time.
+- **General** (robot agnostic): noise values, gates, mode thresholds, drag coefficient, per-class geometry defaults, chi-square gate.
 - **Per robot**:
   - camera intrinsics
   - camera → turret → barrel transforms
@@ -178,7 +181,7 @@ Keep it from hurting the pipeline:
 Pipeline threads are connected by bounded crossbeam channels.
 
 - **Camera**: grab → latest-frame slot.
-- **Serial**: RX parse + clock fit → pose buffer. TX of aim commands also goes through this thread, so only one thread touches the port.
+- **Serial**: RX parse, stamp on arrival → pose buffer. TX of aim commands also goes through this thread, so only one thread touches the port.
 - **Detector pool**: N workers → reorder buffer.
 - **Tracker**: per frame.
 - **Aimer**: fixed rate (100–200 Hz), predicts from the latest estimate. It doesn't wait for new frames.

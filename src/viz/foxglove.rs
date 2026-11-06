@@ -19,7 +19,7 @@ use crate::pipeline::FrameRecord;
 /// Publishes every frame's results.
 #[derive(Debug)]
 pub struct Publisher {
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "Arc<Context> kept alive for side effects")]
     context: Arc<Context>,
     image_channel: Channel<CompressedImage>,
     annotations_channel: Channel<ImageAnnotations>,
@@ -27,7 +27,7 @@ pub struct Publisher {
     frame_channel: Arc<RawChannel>,
     scene_channel: Channel<SceneUpdate>,
     mcap: Option<foxglove::McapWriterHandle<std::io::BufWriter<std::fs::File>>>,
-    _websocket: Option<WebSocketServerHandle>,
+    websocket: Option<WebSocketServerHandle>,
     image_rate: f64,
     last_image_time: f64,
 }
@@ -70,14 +70,14 @@ impl Publisher {
             .build_raw()?;
 
         Ok(Self {
-            context: context.clone(),
+            context: Arc::clone(&context),
             image_channel: context.channel_builder("/camera/image").build(),
             annotations_channel: context.channel_builder("/camera/annotations").build(),
             robot_state_channel,
             frame_channel,
             scene_channel: context.channel_builder("/scene").build(),
             mcap: mcap_writer,
-            _websocket: websocket_handle,
+            websocket: websocket_handle,
             image_rate,
             last_image_time: -1e9,
         })
@@ -106,7 +106,7 @@ impl Publisher {
         }
 
         // Publish image annotations
-        let annotations = build_annotations(frame, record, camera)?;
+        let annotations = build_annotations(frame, record, camera);
         self.annotations_channel.log_with_meta(&annotations, at(log_time_ns));
 
         // Publish robot state as JSON
@@ -203,8 +203,8 @@ impl Publisher {
     /// # Errors
     /// Write failed.
     pub fn finish(self) -> color_eyre::Result<()> {
-        if let Some(ws) = self._websocket {
-            let _ = ws.stop();
+        if let Some(websocket) = self.websocket {
+            let _ = websocket.stop();
         }
         if let Some(writer) = self.mcap {
             writer.close()?;
@@ -219,18 +219,25 @@ fn at(log_time_ns: u64) -> foxglove::PartialMetadata {
     foxglove::PartialMetadata { log_time: Some(log_time_ns) }
 }
 
+#[expect(clippy::as_conversions, reason = "protobuf enum to i32 conversion")]
+fn enum_to_i32(e: foxglove::messages::points_annotation::Type) -> i32 {
+    e as i32
+}
+
 fn time_to_ns(t: f64) -> u64 {
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::as_conversions, reason = "nanosecond conversion is intentional")]
     let ns = (t * 1e9) as u64;
     ns
 }
 
 fn ns_to_timestamp(ns: u64) -> foxglove::messages::Timestamp {
-    #[allow(clippy::cast_possible_truncation)]
-    foxglove::messages::Timestamp::new(
-        (ns / 1_000_000_000) as u32,
-        (ns % 1_000_000_000) as u32,
-    )
+    #[expect(clippy::cast_possible_truncation, clippy::as_conversions, reason = "time fits in u32 seconds")]
+    {
+        foxglove::messages::Timestamp::new(
+            (ns / 1_000_000_000) as u32,
+            (ns % 1_000_000_000) as u32,
+        )
+    }
 }
 
 fn quaternion_from_yaw(yaw: f64) -> Quaternion {
@@ -255,7 +262,7 @@ fn build_annotations(
     frame: &DetectedFrame,
     record: &FrameRecord,
     camera: &Camera,
-) -> color_eyre::Result<ImageAnnotations> {
+) -> ImageAnnotations {
     let t = frame.frame.t;
     let q = record.robot.q;
     let log_time_ns = time_to_ns(t);
@@ -273,7 +280,7 @@ fn build_annotations(
 
         points_annot.push(PointsAnnotation {
             timestamp: None,
-            r#type: foxglove::messages::points_annotation::Type::LineLoop as i32,
+            r#type: enum_to_i32(foxglove::messages::points_annotation::Type::LineLoop),
             points: det_points,
             outline_color: Some(Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 }),
             outline_colors: vec![],
@@ -308,7 +315,7 @@ fn build_annotations(
             if projected.len() == 4 {
                 points_annot.push(PointsAnnotation {
                     timestamp: None,
-                    r#type: foxglove::messages::points_annotation::Type::LineLoop as i32,
+                    r#type: enum_to_i32(foxglove::messages::points_annotation::Type::LineLoop),
                     points: projected,
                     outline_color: Some(Color { r: 0.0, g: 1.0, b: 1.0, a: 1.0 }),
                     outline_colors: vec![],
@@ -321,26 +328,24 @@ fn build_annotations(
     }
 
     // Red aim point
-    if let Some(target) = &record.target {
-        if let Some(impact_px) = camera.project(&q, &target.position) {
-            points_annot.push(PointsAnnotation {
-                timestamp: None,
-                r#type: foxglove::messages::points_annotation::Type::Points as i32,
-                points: vec![Point2 { x: impact_px.x, y: impact_px.y }],
-                outline_color: Some(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
-                outline_colors: vec![],
-                fill_color: Some(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
-                thickness: 8.0,
-                metadata: vec![],
-            });
-        }
+    if let Some(target) = &record.target && let Some(impact_px) = camera.project(&q, &target.position) {
+        points_annot.push(PointsAnnotation {
+            timestamp: None,
+            r#type: enum_to_i32(foxglove::messages::points_annotation::Type::Points),
+            points: vec![Point2 { x: impact_px.x, y: impact_px.y }],
+            outline_color: Some(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+            outline_colors: vec![],
+            fill_color: Some(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+            thickness: 8.0,
+            metadata: vec![],
+        });
     }
 
-    Ok(ImageAnnotations {
+    ImageAnnotations {
         timestamp: Some(ns_to_timestamp(log_time_ns)),
         circles: vec![],
         points: points_annot,
         texts: vec![],
         metadata: vec![],
-    })
+    }
 }
