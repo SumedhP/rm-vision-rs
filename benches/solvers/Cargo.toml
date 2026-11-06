@@ -1,0 +1,21 @@
+[package]
+name = "solver-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Benchmarks our ballistics and gimbal trajectory solvers against existing crates"
+
+[dependencies]
+auto_aim = { path = "../.." }
+nalgebra = "0.35"
+na34 = { package = "nalgebra", version = "0.34" }
+serde_json = "1"
+ode_solvers = "0.6"
+roots = "0.0.8"
+argmin = "0.11"
+tinympc-rs = "0.2"
+clarabel = "0.11"
+osqp = "1"
+
+[profile.release]
+debug = false
