@@ -59,7 +59,7 @@ enum Selection {
 }
 
 /// Stateful aimer: remembers the selected plate and the smoothed gimbal setpoint.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Aimer {
     cfg: AimerConfig,
     limits: GimbalLimits,

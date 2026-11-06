@@ -1,6 +1,7 @@
 ﻿//! ONNX Runtime inference for the SZURP 21-row YOLOv8-pose armor model.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{WrapErr, bail};
 use image::{RgbImage, imageops};
@@ -72,12 +73,26 @@ pub struct DetectorConfig {
     pub workers: usize,
 }
 
+/// Wall time of each stage of the last [`Detector::detect`] call.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StageTimes {
+    /// Resize, letterbox and convert to the input tensor.
+    pub preprocess: Duration,
+    /// ONNX Runtime session run.
+    pub inference: Duration,
+    /// Decode candidates and non-maximum suppression.
+    pub postprocess: Duration,
+    /// Lightbar corner refinement.
+    pub refine: Duration,
+}
+
 /// One ONNX Runtime session plus pre/post-processing.
 #[derive(Debug)]
 pub struct Detector {
     session: Session,
     backend: Backend,
     cfg: DetectorConfig,
+    times: StageTimes,
 }
 
 impl Detector {
@@ -106,7 +121,7 @@ impl Detector {
             .commit_from_file(&cfg.model)
             .map_err(ort_err)
             .wrap_err_with(|| format!("loading {}", cfg.model.display()))?;
-        Ok(Self { session, backend, cfg: cfg.clone() })
+        Ok(Self { session, backend, cfg: cfg.clone(), times: StageTimes::default() })
     }
 
     /// Backend the session actually runs on.
@@ -114,23 +129,38 @@ impl Detector {
         self.backend
     }
 
+    /// Stage timings of the last [`Detector::detect`] call.
+    pub fn last_times(&self) -> StageTimes {
+        self.times
+    }
+
     /// Detects `enemy` armor plates in an RGB image.
     ///
     /// # Errors
     /// Inference failed.
     pub fn detect(&mut self, image: &RgbImage, enemy: ArmorColor) -> color_eyre::Result<Vec<Detection>> {
+        let start = Instant::now();
         let lb = Letterbox::new(image.width(), image.height());
         let input = lb.tensor(image);
+        let preprocessed = Instant::now();
         let outputs = self
             .session
             .run(ort::inputs!["images" => TensorRef::from_array_view(&input).map_err(ort_err)?])
             .map_err(ort_err)?;
+        let inferred = Instant::now();
         let (_, raw) = outputs["output0"].try_extract_tensor::<f32>().map_err(ort_err)?;
         let mut dets = decode(raw, &lb, enemy, self.cfg.score_threshold);
         dets = nms(dets, self.cfg.nms_iou);
+        let decoded = Instant::now();
         if self.cfg.refine_corners {
             dets = dets.into_iter().map(|d| super::refine::refine(image, &d)).collect();
         }
+        self.times = StageTimes {
+            preprocess: preprocessed - start,
+            inference: inferred - preprocessed,
+            postprocess: decoded - inferred,
+            refine: decoded.elapsed(),
+        };
         Ok(dets)
     }
 }

@@ -10,7 +10,7 @@ pub mod onnx;
 pub mod pool;
 pub mod refine;
 
-pub use onnx::{Backend, Detector};
+pub use onnx::{Backend, Detector, StageTimes};
 pub use onnx::DetectorConfig;
 
 /// Lightbar color, in model output order.

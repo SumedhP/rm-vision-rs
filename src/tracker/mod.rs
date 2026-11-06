@@ -161,7 +161,7 @@ struct Geometry {
     h: f64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Track {
     icon: Icon,
     plate_count: usize,
@@ -177,7 +177,7 @@ struct Track {
 }
 
 /// Selects one robot, tracks it with the EKF, and remembers each robot's geometry between tracks.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Tracker {
     cfg: TrackerConfig,
     camera: Camera,
