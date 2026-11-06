@@ -4,9 +4,11 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{WrapErr, bail};
-use image::{RgbImage, imageops};
+use image::RgbImage;
+use kornia_image::{Image, ImageSize};
+use kornia_imgproc::preprocess::{Preprocessor, ResizeMode};
+use kornia_tensor::Tensor;
 use nalgebra::Point2;
-use ndarray::Array4;
 use ort::environment::Environment;
 use ort::ep::{CPU, ExecutionProviderDispatch};
 #[cfg(feature = "gpu")]
@@ -141,11 +143,12 @@ impl Detector {
     pub fn detect(&mut self, image: &RgbImage, enemy: ArmorColor) -> color_eyre::Result<Vec<Detection>> {
         let start = Instant::now();
         let lb = Letterbox::new(image.width(), image.height());
-        let input = lb.tensor(image);
+        let input = preprocess(image)?;
+        let shape = [1, 3, usize_of(IN_H), usize_of(IN_W)];
         let preprocessed = Instant::now();
         let outputs = self
             .session
-            .run(ort::inputs!["images" => TensorRef::from_array_view(&input).map_err(ort_err)?])
+            .run(ort::inputs!["images" => TensorRef::from_array_view((shape, input.as_slice())).map_err(ort_err)?])
             .map_err(ort_err)?;
         let inferred = Instant::now();
         let (_, raw) = outputs["output0"].try_extract_tensor::<f32>().map_err(ort_err)?;
@@ -194,14 +197,21 @@ fn ort_err<R>(e: ort::Error<R>) -> color_eyre::Report {
     color_eyre::eyre::eyre!("onnxruntime: {e}")
 }
 
-/// Aspect-preserving resize into the model input, centered with gray padding.
+/// Letterbox, normalize to `[0, 1]` and convert to the CHW model input, in one fused pass (kornia).
+fn preprocess(image: &RgbImage) -> color_eyre::Result<Tensor<f32, 4>> {
+    let size = ImageSize { width: usize_of(image.width()), height: usize_of(image.height()) };
+    let src = Image::<u8, 3>::from_size_slice(size, image.as_raw())?;
+    let mut input = Tensor::from_shape_val([1, 3, usize_of(IN_H), usize_of(IN_W)], 0.0f32);
+    Preprocessor::builder().mode(ResizeMode::Letterbox).pad_value(PAD).build()?.run(&src, &mut input)?;
+    Ok(input)
+}
+
+/// Where the letterbox puts the image inside the model input; maps keypoints back to the source.
 #[derive(Debug, Clone, Copy)]
 struct Letterbox {
     scale: f64,
     pad_x: u32,
     pad_y: u32,
-    w: u32,
-    h: u32,
     src_w: u32,
     src_h: u32,
 }
@@ -211,19 +221,7 @@ impl Letterbox {
         let scale = (f64::from(IN_H) / f64::from(src_h)).min(f64::from(IN_W) / f64::from(src_w));
         let w = round_px(f64::from(src_w) * scale).min(IN_W);
         let h = round_px(f64::from(src_h) * scale).min(IN_H);
-        Self { scale, pad_x: (IN_W - w) / 2, pad_y: (IN_H - h) / 2, w, h, src_w, src_h }
-    }
-
-    fn tensor(&self, image: &RgbImage) -> Array4<f32> {
-        let resized = imageops::resize(image, self.w, self.h, imageops::FilterType::Triangle);
-        let mut t = Array4::from_elem((1, 3, usize_of(IN_H), usize_of(IN_W)), f32::from(PAD) / 255.0);
-        for (x, y, px) in resized.enumerate_pixels() {
-            let (row, col) = (usize_of(y + self.pad_y), usize_of(x + self.pad_x));
-            for c in 0..3 {
-                t[[0, c, row, col]] = f32::from(px[c]) / 255.0;
-            }
-        }
-        t
+        Self { scale, pad_x: (IN_W - w) / 2, pad_y: (IN_H - h) / 2, src_w, src_h }
     }
 
     fn to_source(self, x: f32, y: f32) -> Option<Point2<f64>> {
@@ -303,7 +301,7 @@ mod tests {
     #[test]
     fn letterbox_matches_szurp_for_960x540() {
         let lb = Letterbox::new(960, 540);
-        assert_eq!((lb.w, lb.h, lb.pad_x, lb.pad_y), (640, 360, 0, 60), "scale 2/3, 60 px bars top and bottom");
+        assert_eq!((lb.pad_x, lb.pad_y), (0, 60),"scale 2/3, 60 px bars top and bottom");
         let p = lb.to_source(320.0, 240.0).expect("center maps inside");
         assert!((p.x - 480.0).abs() < 1e-9 && (p.y - 270.0).abs() < 1e-9, "model center is image center");
     }
