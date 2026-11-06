@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "auto_aim"
 version = "0.1.0"
 edition = "2024"
@@ -27,6 +27,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 color-eyre = "0.6"
 clap = { version = "4", features = ["derive"] }
+imageproc = "0.25"
+ab_glyph = "0.2"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "warn"

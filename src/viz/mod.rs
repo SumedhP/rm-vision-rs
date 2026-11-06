@@ -1,2 +1,4 @@
-﻿//! Logging (MCAP) and live visualization (Foxglove websocket), plus the overlay video renderer.
+﻿//! Visual outputs: the overlay video and Foxglove logging / live streaming.
 
+pub mod foxglove;
+pub mod overlay;
