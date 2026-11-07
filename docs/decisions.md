@@ -20,6 +20,13 @@ Calls made overnight without the operator. Each says what was chosen and why.
 7. **Model I/O** (from SZURP `V8_21InfantryPostProcessor`):
    - Input: `1x3x480x640`, RGB / 255, letterboxed with pad value 124.
    - Output: `21x6300` = 4 color scores, 9 class scores, then 4 keypoints (TL, BL, BR, TR) in model pixels. Scores are already sigmoided.
+   - This layout is data: the `detector.spec` block in `configs/general.yaml` (`src/detector/spec.rs`) covers:
+     - tensor names, input size and pad value
+     - color and class tables
+     - logits or not, transposed or not
+     - keypoint order
+
+     The decoder reads only the spec, so another YOLO-pose armor net is a config change. A detector of a different kind (classical lightbars, two-stage) would still need code.
 8. **GPU backends behind a `gpu` cargo feature.** Without it, TensorRT and CUDA report unavailable and the detector falls back to CPU, logging a warning. `require_backend: true` turns that fallback into a startup error. Build with `--features gpu` on the Jetson.
 9. **The test data has no IMU**, so `RobotSource::Defaults` supplies a level gimbal from `configs/robots/realsense_test.yaml`. Own `robot_id` 103 (blue) makes red the enemy color, which matches the videos.
 

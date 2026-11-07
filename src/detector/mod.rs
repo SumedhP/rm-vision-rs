@@ -1,4 +1,5 @@
-﻿//! Armor detector: SZURP YOLOv8-pose model (`Infantry-v8n-fp16-20260726-D1.8w-B16.onnx`).
+﻿//! Armor detector: any YOLO-pose armor model described by a [`ModelSpec`] (configured for SZURP's
+//! `Infantry-v8n-fp16-20260726-D1.8w-B16.onnx`).
 
 use nalgebra::Point2;
 use serde::Deserialize;
@@ -9,11 +10,13 @@ use crate::io::CameraFrame;
 pub mod onnx;
 pub mod pool;
 pub mod refine;
+pub mod spec;
 
 pub use onnx::{Backend, Detector, StageTimes};
 pub use onnx::DetectorConfig;
+pub use spec::ModelSpec;
 
-/// Lightbar color, in model output order.
+/// Lightbar color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -28,7 +31,7 @@ pub enum ArmorColor {
     Purple,
 }
 
-/// Plate sticker, in model output order.
+/// Plate sticker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -54,12 +57,6 @@ pub enum Icon {
 }
 
 impl Icon {
-    /// Model class index to icon.
-    pub fn from_class(i: usize) -> Option<Icon> {
-        use Icon::*;
-        [Sentry, Hero, Engineer, Infantry3, Infantry4, Infantry5, Outpost, BaseBottom, BaseTop].get(i).copied()
-    }
-
     /// Physical plate size for this icon.
     pub fn armor_size(self) -> ArmorSize {
         match self {

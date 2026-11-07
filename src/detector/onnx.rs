@@ -1,9 +1,9 @@
-﻿//! ONNX Runtime inference for the SZURP 21-row YOLOv8-pose armor model.
+﻿//! ONNX Runtime inference for YOLO-pose armor models, laid out as described by a [`ModelSpec`].
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use color_eyre::eyre::{WrapErr, bail};
+use color_eyre::eyre::{WrapErr, bail, eyre};
 use image::RgbImage;
 use kornia_image::{Image, ImageSize};
 use kornia_imgproc::preprocess::{Preprocessor, ResizeMode};
@@ -17,11 +17,7 @@ use ort::session::Session;
 use ort::value::TensorRef;
 use serde::Deserialize;
 
-use crate::detector::{ArmorColor, Detection, Icon};
-
-const IN_W: u32 = 640;
-const IN_H: u32 = 480;
-const PAD: u8 = 124;
+use crate::detector::{ArmorColor, Detection, ModelSpec};
 
 /// Execution provider, tried in the configured order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -57,6 +53,8 @@ impl Backend {
 pub struct DetectorConfig {
     /// ONNX model path.
     pub model: PathBuf,
+    /// The model's input and output layout.
+    pub spec: ModelSpec,
     /// Execution providers in priority order; CPU is the implicit last resort.
     pub backends: Vec<Backend>,
     /// Fail at startup unless the first backend is available.
@@ -142,17 +140,24 @@ impl Detector {
     /// Inference failed.
     pub fn detect(&mut self, image: &RgbImage, enemy: ArmorColor) -> color_eyre::Result<Vec<Detection>> {
         let start = Instant::now();
-        let lb = Letterbox::new(image.width(), image.height());
-        let input = preprocess(image)?;
-        let shape = [1, 3, usize_of(IN_H), usize_of(IN_W)];
+        let spec = &self.cfg.spec;
+        let [in_w, in_h] = spec.input_size;
+        let lb = Letterbox::new(image.width(), image.height(), in_w, in_h);
+        let input = preprocess(image, spec)?;
+        let shape = [1, 3, usize_of(in_h), usize_of(in_w)];
         let preprocessed = Instant::now();
         let outputs = self
             .session
-            .run(ort::inputs!["images" => TensorRef::from_array_view((shape, input.as_slice())).map_err(ort_err)?])
+            .run(ort::inputs![spec.input_name.as_str() => TensorRef::from_array_view((shape, input.as_slice())).map_err(ort_err)?])
             .map_err(ort_err)?;
         let inferred = Instant::now();
-        let (_, raw) = outputs["output0"].try_extract_tensor::<f32>().map_err(ort_err)?;
-        let mut dets = decode(raw, &lb, enemy, self.cfg.score_threshold);
+        let output = outputs.get(spec.output_name.as_str()).ok_or_else(|| eyre!("model has no output {:?}", spec.output_name))?;
+        let (dims, raw) = output.try_extract_tensor::<f32>().map_err(ort_err)?;
+        let rows_dim = if spec.transposed { dims.last() } else { dims.get(dims.len().saturating_sub(2)) };
+        if rows_dim.and_then(|&d| usize::try_from(d).ok()) != Some(spec.rows()) {
+            bail!("model output {dims:?} does not match the spec's {} values per candidate (transposed: {})", spec.rows(), spec.transposed);
+        }
+        let mut dets = decode(raw, spec, &lb, enemy, self.cfg.score_threshold);
         dets = nms(dets, self.cfg.nms_iou);
         let decoded = Instant::now();
         if self.cfg.refine_corners {
@@ -198,11 +203,12 @@ fn ort_err<R>(e: ort::Error<R>) -> color_eyre::Report {
 }
 
 /// Letterbox, normalize to `[0, 1]` and convert to the CHW model input, in one fused pass (kornia).
-fn preprocess(image: &RgbImage) -> color_eyre::Result<Tensor<f32, 4>> {
+fn preprocess(image: &RgbImage, spec: &ModelSpec) -> color_eyre::Result<Tensor<f32, 4>> {
     let size = ImageSize { width: usize_of(image.width()), height: usize_of(image.height()) };
     let src = Image::<u8, 3>::from_size_slice(size, image.as_raw())?;
-    let mut input = Tensor::from_shape_val([1, 3, usize_of(IN_H), usize_of(IN_W)], 0.0f32);
-    Preprocessor::builder().mode(ResizeMode::Letterbox).pad_value(PAD).build()?.run(&src, &mut input)?;
+    let [w, h] = spec.input_size;
+    let mut input = Tensor::from_shape_val([1, 3, usize_of(h), usize_of(w)], 0.0f32);
+    Preprocessor::builder().mode(ResizeMode::Letterbox).pad_value(spec.pad).build()?.run(&src, &mut input)?;
     Ok(input)
 }
 
@@ -217,11 +223,11 @@ struct Letterbox {
 }
 
 impl Letterbox {
-    fn new(src_w: u32, src_h: u32) -> Self {
-        let scale = (f64::from(IN_H) / f64::from(src_h)).min(f64::from(IN_W) / f64::from(src_w));
-        let w = round_px(f64::from(src_w) * scale).min(IN_W);
-        let h = round_px(f64::from(src_h) * scale).min(IN_H);
-        Self { scale, pad_x: (IN_W - w) / 2, pad_y: (IN_H - h) / 2, src_w, src_h }
+    fn new(src_w: u32, src_h: u32, in_w: u32, in_h: u32) -> Self {
+        let scale = (f64::from(in_h) / f64::from(src_h)).min(f64::from(in_w) / f64::from(src_w));
+        let w = round_px(f64::from(src_w) * scale).min(in_w);
+        let h = round_px(f64::from(src_h) * scale).min(in_h);
+        Self { scale, pad_x: (in_w - w) / 2, pad_y: (in_h - h) / 2, src_w, src_h }
     }
 
     fn to_source(self, x: f32, y: f32) -> Option<Point2<f64>> {
@@ -234,29 +240,33 @@ impl Letterbox {
     }
 }
 
-/// Output layout per candidate column: 4 color scores, 9 class scores, 4 keypoints (x, y).
-fn decode(raw: &[f32], lb: &Letterbox, enemy: ArmorColor, threshold: f32) -> Vec<Detection> {
-    let n = raw.len() / 21;
-    let at = |row: usize, i: usize| raw[row * n + i];
+/// Candidates above `threshold` in the `enemy` color, keypoints mapped back to source pixels.
+fn decode(raw: &[f32], spec: &ModelSpec, lb: &Letterbox, enemy: ArmorColor, threshold: f32) -> Vec<Detection> {
+    let rows = spec.rows();
+    let n = raw.len() / rows;
+    let at = |row: usize, i: usize| if spec.transposed { raw[i * rows + row] } else { raw[row * n + i] };
     let argmax = |rows: std::ops::Range<usize>, i: usize| {
         rows.clone().max_by(|&a, &b| at(a, i).total_cmp(&at(b, i))).map_or(0, |r| r - rows.start)
     };
+    let (n_colors, n_icons) = (spec.colors.len(), spec.icons.len());
+    let keypoints = n_colors + n_icons;
     (0..n)
         .filter_map(|i| {
-            let class = argmax(4..13, i);
-            let confidence = at(4 + class, i);
+            let class = argmax(n_colors..keypoints, i);
+            let score = at(n_colors + class, i);
+            let confidence = if spec.logits { 1.0 / (1.0 + (-score).exp()) } else { score };
             if confidence < threshold {
                 return None;
             }
-            let color = [ArmorColor::Blue, ArmorColor::Red, ArmorColor::Gray, ArmorColor::Purple][argmax(0..4, i)];
+            let color = spec.colors[argmax(0..n_colors, i)];
             if color != enemy {
                 return None;
             }
             let mut corners = [Point2::origin(); 4];
-            for (k, c) in corners.iter_mut().enumerate() {
-                *c = lb.to_source(at(13 + 2 * k, i), at(14 + 2 * k, i))?;
+            for (corner, &k) in corners.iter_mut().zip(&spec.corners) {
+                *corner = lb.to_source(at(keypoints + 2 * k, i), at(keypoints + 2 * k + 1, i))?;
             }
-            Some(Detection { color, icon: Icon::from_class(class)?, confidence, corners })
+            Some(Detection { color, icon: spec.icons[class], confidence, corners })
         })
         .collect()
 }
@@ -297,10 +307,55 @@ fn usize_of(v: u32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::detector::Icon;
+
+    fn spec(logits: bool, transposed: bool, corners: [usize; 4]) -> ModelSpec {
+        ModelSpec {
+            input_name: "images".into(),
+            output_name: "output0".into(),
+            input_size: [640, 480],
+            pad: 124,
+            colors: vec![ArmorColor::Blue, ArmorColor::Red],
+            icons: vec![Icon::Hero, Icon::Infantry3],
+            logits,
+            transposed,
+            corners,
+        }
+    }
+
+    /// Two candidates: a red Infantry3 and a blue Hero. Keypoint `k` is stored at `(10k, 100 + k)`.
+    fn candidates(score: f32) -> [[f32; 12]; 2] {
+        let keypoints = |base: f32| [base, 100.0, base + 10.0, 101.0, base + 20.0, 102.0, base + 30.0, 103.0];
+        let mut red = [0.1, 0.9, 0.2, score, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        red[4..].copy_from_slice(&keypoints(0.0));
+        let mut blue = [0.9, 0.1, score, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        blue[4..].copy_from_slice(&keypoints(200.0));
+        [red, blue]
+    }
+
+    /// The same candidates in every layout the spec describes decode to the same detection.
+    #[test]
+    fn decodes_any_described_layout() {
+        let lb = Letterbox::new(640, 480, 640, 480);
+        let decode_with = |s: &ModelSpec, score: f32| {
+            let c = candidates(score);
+            let raw: Vec<f32> = if s.transposed { c.iter().flatten().copied().collect() } else { (0..12).flat_map(|row| c.iter().map(move |cand| cand[row])).collect() };
+            decode(&raw, s, &lb, ArmorColor::Red, 0.5)
+        };
+        let plain = decode_with(&spec(false, false, [0, 1, 2, 3]), 0.8);
+        assert_eq!(plain.len(), 1, "only the red candidate");
+        assert_eq!((plain[0].icon, plain[0].color), (Icon::Infantry3, ArmorColor::Red), "class and color from the spec's tables");
+        assert_eq!(plain[0].corners[1], Point2::new(10.0, 101.0), "keypoint 1 is bottom-left");
+        assert_eq!(decode_with(&spec(false, true, [0, 1, 2, 3]), 0.8), plain, "transposed output");
+        let logit = decode_with(&spec(true, false, [0, 1, 2, 3]), 1.386_294_4);
+        assert!((logit[0].confidence - 0.8).abs() < 1e-6 && logit[0].corners == plain[0].corners, "sigmoid applied to logits");
+        let swapped = decode_with(&spec(false, false, [1, 0, 3, 2]), 0.8);
+        assert_eq!(swapped[0].corners[0], plain[0].corners[1], "corner order follows the spec");
+    }
 
     #[test]
     fn letterbox_matches_szurp_for_960x540() {
-        let lb = Letterbox::new(960, 540);
+        let lb = Letterbox::new(960, 540, 640, 480);
         assert_eq!((lb.pad_x, lb.pad_y), (0, 60),"scale 2/3, 60 px bars top and bottom");
         let p = lb.to_source(320.0, 240.0).expect("center maps inside");
         assert!((p.x - 480.0).abs() < 1e-9 && (p.y - 270.0).abs() < 1e-9, "model center is image center");

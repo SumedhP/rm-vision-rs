@@ -1,5 +1,15 @@
 ﻿detector:
   model: assets/models/Infantry-v8n-fp16-20260726-D1.8w-B16.onnx
+  spec:
+    input_name: images
+    output_name: output0
+    input_size: [640, 480]
+    pad: 124
+    colors: [blue, red, gray, purple]
+    icons: [sentry, hero, engineer, infantry3, infantry4, infantry5, outpost, base_bottom, base_top]
+    logits: false
+    transposed: false
+    corners: [0, 1, 2, 3]
   backends: [tensorrt, cuda, cpu]
   require_backend: false
   fp16: true

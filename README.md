@@ -16,7 +16,7 @@ RobotSource ──┘   (pose @ frame time)       (EKF)     (ballistics + fire)
 |---|---|
 | `src/io/` | Inputs. `CameraSource::{Video, Log}`, `RobotSource::{Defaults, Log}` |
 | `src/sync/pose_buffer.rs` | Time sync. Gimbal pose slerped to the frame time; link latencies are fixed config values |
-| `src/detector/` | Detector. `onnx.rs` (model I/O, backends + fallback), `pool.rs` (N workers, strict frame order), `refine.rs` (lightbar corner refinement) |
+| `src/detector/` | Detector. `spec.rs` (the model's input/output layout, set in config), `onnx.rs` (inference, decoding, backends + fallback), `pool.rs` (N workers, strict frame order), `refine.rs` (lightbar corner refinement) |
 | `src/tracker/` | Tracker. `measurement.rs` (plate pose), `ekf.rs` (11-state iterated EKF, chi-square gate, pose or corner-pixel measurement), `model.rs` (robot model), `mod.rs` (selection, association, lifecycle, plate/robot mode, priors) |
 | `src/aimer/` | Aimer. `ballistics.rs` (RK4 + drag), `trajectory.rs` (acceleration-limited smoother), `aimer.rs` (rmcs-style attack window, pre-aim, center aim, timed fire) |
 | `src/pipeline.rs` | The loop. Runs in data time, so replays are deterministic |
