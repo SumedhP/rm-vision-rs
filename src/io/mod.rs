@@ -10,6 +10,7 @@ use nalgebra::UnitQuaternion;
 use serde::Deserialize;
 
 pub mod mcap_log;
+pub mod serial;
 pub mod video;
 
 /// One camera image. `t` is seconds on the pipeline clock, already corrected by `camera_delay`.

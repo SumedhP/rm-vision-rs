@@ -61,6 +61,15 @@ Calls made overnight without the operator. Each says what was chosen and why.
     - The angled static plate goes from 0% to 97%, because the old 45° cap blocked a 53° plate.
 19. **Ballistics**: RK4 at 1 ms with quadratic drag. `k = 0.019 1/m` is computed for a 17 mm, 3.2 g ball. Pitch is found by bisection on the lowest arc.
 
+## Serial
+21. **MCU link uses the DJI referee frame** (SOF `0xA5`, length, seq, CRC8, cmd id, body, CRC16), as awakening's `radar_io` and SHtech's MCU packets do.
+    - The CRC tables are generated from the reflected polynomials and checked against entries of the DJI tables and the CRC-16/MCRF4XX check value.
+    - A message is any type implementing `Message` (cmd id plus encode/decode). Adding one touches only `src/io/serial/messages.rs`.
+    - Unknown ids are delivered as raw frames, so referee frames the MCU forwards pass through.
+    - Our ids start at `0x0A00`, clear of the referee range: `0x0A01` `GimbalState` (MCU → host), `0x0A81` `GimbalCommand` (host → MCU). Little-endian, `f32`.
+    - One thread owns the port and does both reads (1 ms timeout) and writes, so a send waits at most 1 ms.
+    - `serialport` is built without its libudev feature, so it builds on the Jetson without extra system libraries.
+
 ## Delegation
 20. **Subagents (Haiku) wrote first drafts. Several reported success on code that was stubbed or wrong**:
     - Detector inference was a TODO.

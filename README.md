@@ -51,7 +51,8 @@ python scripts/plots.py                    # figures + out/report/summary.md
 ## Not tested here
 
 - **GPU backends**: compiled behind `--features gpu`. On this laptop the CPU fallback path is exercised and tested instead.
-- **Serial and live camera**: no hardware. The `Live` source variants and the MCU packet format are still to be written. Robot state comes from config defaults or a recorded log.
+- **Serial**: the MCU link (`src/io/serial/`) is written and tested end to end over an in-memory null-modem cable (`tests/serial.rs`), but not on a real port. Try it on hardware with `cargo run --release --example serial_monitor -- --port <port>`. It isn't wired into the pipeline yet.
+- **Live camera**: no hardware. Robot state comes from config defaults or a recorded log.
 - **Latency values**: these are fixed config numbers. `docs/design.md` describes how to measure them.
 
 ## Results on the RealSense recordings (CPU)
